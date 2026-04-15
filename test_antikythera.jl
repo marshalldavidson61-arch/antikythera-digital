@@ -1,17 +1,15 @@
 # ==========================================================================
-# THE ANTIKYTHERA DIFF-ENGINE — COMPREHENSIVE TEST SUITE
+# THE ANTIKYTHERA DIFF-ENGINE — COMPREHENSIVE TEST SUITE v2.0
 # ==========================================================================
 # Run: julia test_antikythera.jl
-# 
-# This script puts the machine through its paces.
-# Every command. Every edge case. Every intractable operation.
-# If this passes, you've got a working geometric calculus engine.
+#
+# Full coverage of every feature, edge case, and intractable operation.
+# If this passes, the machine lives.
 # ==========================================================================
 
-# Load the engine
 include("antikythera_diff_engine.jl")
-
 using Printf
+using LinearAlgebra
 
 # ==========================================================================
 # TEST INFRASTRUCTURE
@@ -55,207 +53,276 @@ function test_throws(name::String, expected_msg::String, f::Function)
 end
 
 function section(title::String)
-    println("\n═══════════════════════════════════════════════════════════════")
+    println("\n" * "═"^63)
     println("  $(title)")
-    println("═══════════════════════════════════════════════════════════════")
+    println("═"^63)
 end
 
 # ==========================================================================
-# TEST SECTION 1: MACHINE INITIALIZATION
+# SECTION 1: MACHINE INITIALIZATION
 # ==========================================================================
-
 section("1. MACHINE INITIALIZATION")
 
-# Test default construction
 machine = AntikytheraMap()
-test("Default slack", machine.slack == 0.01)
+test("Default slack",    machine.slack == 0.01)
 test("Default throttle", machine.throttle_clamp == 0.0)
-test("Empty gears", isempty(machine.gears))
+test("Empty gears",      isempty(machine.gears))
+test("Zero query count", machine.query_count == 0)
 
-# Test custom slack
 machine_tight = AntikytheraMap(0.001)
-test("Custom slack", machine_tight.slack == 0.001)
+test("Custom slack 0.001", machine_tight.slack == 0.001)
 
-# Test invalid slack
-test_throws("Zero slack rejected", "POSITIVE", () -> AntikytheraMap(0.0))
+machine_fine = AntikytheraMap(0.0001)
+test("Fine slack 0.0001", machine_fine.slack == 0.0001)
+
+test_throws("Zero slack rejected",     "POSITIVE", () -> AntikytheraMap(0.0))
 test_throws("Negative slack rejected", "POSITIVE", () -> AntikytheraMap(-0.1))
 
 # ==========================================================================
-# TEST SECTION 2: GEAR CASTING
+# SECTION 2: GEAR CASTING — LIBRARY + CUSTOM
 # ==========================================================================
-
 section("2. GEAR CASTING")
 
-# Test JIT casting with default preset
+# Default preset: 4 standard gears
 jit_cast_gears!(machine)
-test("Default preset loads gears", length(machine.gears) == 4)
-test("Sphere loaded", haskey(machine.gears, :Sphere))
-test("Torus loaded", haskey(machine.gears, :Torus))
-test("Gyroid loaded", haskey(machine.gears, :Gyroid))
+test("Default preset gear count", length(machine.gears) == 4)
+test("Sphere loaded",       haskey(machine.gears, :Sphere))
+test("Torus loaded",        haskey(machine.gears, :Torus))
+test("Gyroid loaded",       haskey(machine.gears, :Gyroid))
 test("TwistedTorus loaded", haskey(machine.gears, :TwistedTorus))
 
-# Test single gear casting
+# All preset: full library
+machine_all = AntikytheraMap(0.001)
+jit_cast_gears!(machine_all; preset="all")
+test("All preset >= 11 shapes", length(machine_all.gears) >= 11)
+
+# Single gear casting
 machine2 = AntikytheraMap(0.001)
-cast_single!(machine2, :TestSphere, "sphere", [5.0])
-test("Single gear cast", haskey(machine2.gears, :TestSphere))
-test("Single gear params", machine2.gears[:TestSphere].teeth_params == [5.0])
+cast_single!(machine2, :MySphere, "sphere", [3.0])
+test("Single sphere cast",      haskey(machine2.gears, :MySphere))
+test("Single sphere params",    machine2.gears[:MySphere].teeth_params == [3.0])
+test("Single sphere ndims",     machine2.gears[:MySphere].ndims == 3)
 
-# Test invalid shape key
-test_throws("Invalid shape rejected", "NO SUCH SHAPE", 
-    () -> cast_single!(machine2, :Bad, "nonexistent", [1.0]))
+# All library shapes individually
+for shape in ["sphere", "torus", "box", "cylinder", "gyroid", "schwarz",
+              "twisted_torus", "cone", "capsule", "plane", "ellipsoid"]
+    machine_shape = AntikytheraMap(0.001)
+    cast_single!(machine_shape, :Test, shape, copy(GEAR_LIBRARY[shape][2]))
+    test("Shape '$(shape)' casts", haskey(machine_shape.gears, :Test))
+end
 
-# Test "all" preset
-machine3 = AntikytheraMap(0.001)
-jit_cast_gears!(machine3; preset="all")
-test("All preset loads full library", length(machine3.gears) == 7)
+# Invalid shape
+test_throws("Invalid shape rejected", "NO SUCH SHAPE",
+    () -> cast_single!(machine2, :Bad, "unicorn", [1.0]))
+
+# Unknown preset
+test_throws("Unknown preset rejected", "UNKNOWN PRESET",
+    () -> jit_cast_gears!(machine2; preset="superspecial"))
+
+# Cog type coercion
+cog = Cog(:TypeTest, sdf_sphere, [5]; ndims=3)
+test("Int param coerced to Float64",   cog.teeth_params == [5.0])
+test("Float64 vector stored",          isa(cog.teeth_params, Vector{Float64}))
+
+# Empty params rejected
+test_throws("Empty params rejected", "NO TEETH",
+    () -> Cog(:Ghost, sdf_sphere, Float64[]; ndims=3))
 
 # ==========================================================================
-# TEST SECTION 3: THROTTLE AND FLOW CONTROL
+# SECTION 3: THROTTLE AND FLOW CONTROL
 # ==========================================================================
-
 section("3. THROTTLE AND FLOW CONTROL")
 
-# Test throttle gate
 machine.throttle_clamp = 0.0
-test_throws("Probe blocked when throttle shut", "THROTTLE SHUT", 
+test_throws("Probe blocked at throttle=0",    "THROTTLE SHUT",
     () -> probe(machine, :Sphere, [0.0, 0.0, 0.0]))
+test_throws("Gradient blocked at throttle=0", "THROTTLE SHUT",
+    () -> gradient(machine, :Sphere, [5.0, 0.0, 0.0]))
 
 machine.throttle_clamp = 0.5
 result = probe(machine, :Sphere, [0.0, 0.0, 0.0])
-test("Probe works when throttle open", isapprox(result, -5.0; atol=0.01))
+test("Probe works when throttle=0.5", isapprox(result, -5.0; atol=0.01))
 
-# ==========================================================================
-# TEST SECTION 4: PROBE OPERATION (RAW SDF)
-# ==========================================================================
-
-section("4. PROBE OPERATION")
+machine.throttle_clamp = 1.0
+result2 = probe(machine, :Sphere, [0.0, 0.0, 0.0])
+test("Probe works when throttle=1.0", isapprox(result2, -5.0; atol=0.01))
 
 machine.throttle_clamp = 0.5
 
-# Sphere: at origin, SDF should be -radius (inside)
-sphere_inside = probe(machine, :Sphere, [0.0, 0.0, 0.0])
-test("Sphere probe at center (inside)", isapprox(sphere_inside, -5.0; atol=0.01))
+# ==========================================================================
+# SECTION 4: PROBE OPERATION (RAW SDF VALUES)
+# ==========================================================================
+section("4. PROBE — RAW SDF VALUES")
 
-# Sphere: on surface at radius
-sphere_surface = probe(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere probe on surface", abs(sphere_surface) < 0.01)
+# Sphere: inside / surface / outside
+test("Sphere at center = -radius",    isapprox(probe(machine, :Sphere, [0.0,0.0,0.0]), -5.0; atol=0.01))
+test("Sphere on surface = 0",         abs(probe(machine, :Sphere, [5.0,0.0,0.0])) < 0.01)
+test("Sphere outside = positive",     probe(machine, :Sphere, [10.0,0.0,0.0]) > 0)
+test("Sphere outside value",          isapprox(probe(machine, :Sphere, [10.0,0.0,0.0]), 5.0; atol=0.01))
 
-# Sphere: outside
-sphere_outside = probe(machine, :Sphere, [10.0, 0.0, 0.0])
-test("Sphere probe outside", isapprox(sphere_outside, 5.0; atol=0.01))
+# Torus: hole / tube surface / outside
+test("Torus in hole = outside",       probe(machine, :Torus, [0.0,0.0,0.0]) > 0)
+test("Torus on tube surface ≈ 0",     abs(probe(machine, :Torus, [10.0,0.0,0.0])) < 0.01)
+test("Torus inside tube = negative",  probe(machine, :Torus, [8.0,0.0,0.0]) < 0)
 
-# Torus: inside the donut hole
-torus_hole = probe(machine, :Torus, [0.0, 0.0, 0.0])
-test("Torus probe in hole (outside)", torus_hole > 0)
+# Gyroid at origin = 0 (minimal surface passes through origin)
+test("Gyroid at origin ≈ 0",          isapprox(probe(machine, :Gyroid, [0.0,0.0,0.0]), 0.0; atol=0.01))
 
-# Torus: inside the tube
-torus_tube = probe(machine, :Torus, [8.0, 0.0, 0.0])
-test("Torus probe in tube (inside)", torus_tube < 0)
+# Box
+machine_box = AntikytheraMap(0.001)
+machine_box.throttle_clamp = 0.5
+cast_single!(machine_box, :Box, "box", [3.0, 4.0, 5.0])
+test("Box at origin = negative (inside)",  probe(machine_box, :Box, [0.0,0.0,0.0]) < 0)
+test("Box far away = positive (outside)", probe(machine_box, :Box, [10.0,0.0,0.0]) > 0)
+test("Box on face ≈ 0",                   abs(probe(machine_box, :Box, [3.0,0.0,0.0])) < 0.01)
 
-# Gyroid: periodic oscillation
-gyroid_origin = probe(machine, :Gyroid, [0.0, 0.0, 0.0])
-test("Gyroid at origin", isapprox(gyroid_origin, 0.0; atol=0.01))
+# Cylinder
+machine_cyl = AntikytheraMap(0.001)
+machine_cyl.throttle_clamp = 0.5
+cast_single!(machine_cyl, :Cyl, "cylinder", [3.0, 5.0])
+test("Cylinder inside = negative",        probe(machine_cyl, :Cyl, [0.0,0.0,0.0]) < 0)
+test("Cylinder outside = positive",       probe(machine_cyl, :Cyl, [10.0,0.0,0.0]) > 0)
 
-# Dimension mismatch test
-test_throws("Dimension mismatch caught", "3D", 
+# New shapes
+machine_new = AntikytheraMap(0.001)
+machine_new.throttle_clamp = 0.5
+cast_single!(machine_new, :Capsule,   "capsule",   [2.0, 4.0])
+cast_single!(machine_new, :Plane,     "plane",     [0.0, 1.0, 0.0, 0.0])
+cast_single!(machine_new, :Ellipsoid, "ellipsoid", [4.0, 2.0, 3.0])
+test("Capsule at origin = negative (inside)",    probe(machine_new, :Capsule, [0.0,0.0,0.0]) < 0)
+test("Capsule far away = positive (outside)",    probe(machine_new, :Capsule, [10.0,0.0,0.0]) > 0)
+test("Plane at y=1 = 1.0",                      isapprox(probe(machine_new, :Plane, [0.0,1.0,0.0]), 1.0; atol=0.01))
+test("Plane at y=-1 = -1.0",                    isapprox(probe(machine_new, :Plane, [0.0,-1.0,0.0]), -1.0; atol=0.01))
+test("Ellipsoid on major axis ≈ 0",              abs(probe(machine_new, :Ellipsoid, [4.0,0.0,0.0])) < 0.02)
+test("Ellipsoid inside = negative",              probe(machine_new, :Ellipsoid, [0.0,0.0,0.0]) < 0)
+
+# Dimension mismatch
+test_throws("Dimension mismatch caught", "3D",
     () -> probe(machine, :Sphere, [0.0, 0.0]))
 
-# ==========================================================================
-# TEST SECTION 5: GRADIENT (SPATIAL DIFFERENTIATION)
-# ==========================================================================
-
-section("5. GRADIENT OPERATION")
-
-# Sphere gradient at [0,0,0]: should point outward from center
-grad_origin = gradient(machine, :Sphere, [0.0, 0.0, 0.0])
-test("Sphere gradient at origin - direction", 
-    isapprox(grad_origin[1], 0.0; atol=0.01) && isapprox(grad_origin[2], 0.0; atol=0.01) && isapprox(grad_origin[3], 0.0; atol=0.01))
-
-# Sphere gradient at [5,0,0]: should be normal to surface
-grad_surface = gradient(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere gradient at surface - magnitude", isapprox(norm(grad_surface), 1.0; atol=0.02))
-test("Sphere gradient at surface - direction X", isapprox(grad_surface[1], 1.0; atol=0.05))
-test("Sphere gradient at surface - direction Y/Z near zero", 
-    abs(grad_surface[2]) < 0.05 && abs(grad_surface[3]) < 0.05)
-
-# Torus gradient: should point outward from tube center
-grad_torus = gradient(machine, :Torus, [10.0, 0.0, 0.0])
-test("Torus gradient magnitude reasonable", norm(grad_torus) > 0.5)
-
-# Gyroid gradient: complex surface
-grad_gyroid = gradient(machine, :Gyroid, [1.0, 1.0, 1.0])
-test("Gyroid gradient computed", !any(isnan, grad_gyroid) && !any(isinf, grad_gyroid))
-
-# TwistedTorus gradient: brutal for symbolic diff, trivial for spatial
-grad_twisted = gradient(machine, :TwistedTorus, [10.0, 0.0, 0.0])
-test("TwistedTorus gradient computed", !any(isnan, grad_twisted) && !any(isinf, grad_twisted))
+# Query count increments
+before = machine.query_count
+probe(machine, :Sphere, [5.0,0.0,0.0])
+test("Query count increments", machine.query_count == before + 1)
 
 # ==========================================================================
-# TEST SECTION 6: SURFACE NORMAL
+# SECTION 5: GRADIENT (SPATIAL DIFFERENTIATION)
 # ==========================================================================
+section("5. GRADIENT — SPATIAL DIFFERENTIATION")
 
+# Sphere surface normal = gradient (normalized)
+g_surf = gradient(machine, :Sphere, [5.0, 0.0, 0.0])
+test("Sphere gradient |g| ≈ 1",     isapprox(norm(g_surf), 1.0; atol=0.02))
+test("Sphere gradient x-component", isapprox(g_surf[1], 1.0; atol=0.05))
+test("Sphere gradient y≈0, z≈0",    abs(g_surf[2]) < 0.05 && abs(g_surf[3]) < 0.05)
+
+g_y = gradient(machine, :Sphere, [0.0, 5.0, 0.0])
+test("Sphere gradient y-axis direction", isapprox(g_y[2], 1.0; atol=0.05))
+
+g_z = gradient(machine, :Sphere, [0.0, 0.0, 5.0])
+test("Sphere gradient z-axis direction", isapprox(g_z[3], 1.0; atol=0.05))
+
+# Torus gradient on outer equator
+g_torus = gradient(machine, :Torus, [10.0, 0.0, 0.0])
+test("Torus gradient |g| ≈ 1",      isapprox(norm(g_torus), 1.0; atol=0.02))
+test("Torus gradient no NaN/Inf",   !any(isnan, g_torus) && !any(isinf, g_torus))
+
+# Gyroid gradient at non-symmetric point
+g_gyroid = gradient(machine, :Gyroid, [1.0, 1.0, 1.0])
+test("Gyroid gradient no NaN/Inf",  !any(isnan, g_gyroid) && !any(isinf, g_gyroid))
+test("Gyroid gradient nonzero",     norm(g_gyroid) > 0.01)
+
+# TwistedTorus gradient — brutal for symbolic diff
+g_twisted = gradient(machine, :TwistedTorus, [10.0, 0.0, 0.0])
+test("TwistedTorus gradient no NaN", !any(isnan, g_twisted))
+test("TwistedTorus gradient |g| > 0", norm(g_twisted) > 0.01)
+
+# Plane has constant gradient = normal vector
+g_plane = gradient(machine_new, :Plane, [3.14, 2.71, 1.41])
+test("Plane gradient = [0,1,0]", isapprox(g_plane[2], 1.0; atol=0.01) &&
+     abs(g_plane[1]) < 0.01 && abs(g_plane[3]) < 0.01)
+
+# ==========================================================================
+# SECTION 6: SURFACE NORMAL
+# ==========================================================================
 section("6. SURFACE NORMAL")
 
-# Sphere normal at [5,0,0] should be [1,0,0]
 n_sphere = surface_normal(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere normal unit length", isapprox(norm(n_sphere), 1.0; atol=0.01))
-test("Sphere normal direction", isapprox(n_sphere[1], 1.0; atol=0.05))
+test("Sphere normal unit length",   isapprox(norm(n_sphere), 1.0; atol=0.01))
+test("Sphere normal x≈1",          isapprox(n_sphere[1], 1.0; atol=0.05))
 
-# Torus normal
 n_torus = surface_normal(machine, :Torus, [10.0, 0.0, 0.0])
-test("Torus normal unit length", isapprox(norm(n_torus), 1.0; atol=0.02))
+test("Torus normal unit length",   isapprox(norm(n_torus), 1.0; atol=0.02))
+
+n_gyroid = surface_normal(machine, :Gyroid, [1.57, 0.0, 0.0])
+test("Gyroid normal unit length",  isapprox(norm(n_gyroid), 1.0; atol=0.05))
+
+# Zero gradient point → should throw
+test_throws("Normal at zero-gradient point throws", "ZERO",
+    () -> surface_normal(machine, :Sphere, [0.0, 0.0, 0.0]))
 
 # ==========================================================================
-# TEST SECTION 7: CURVATURE (HESSIAN)
+# SECTION 7: CURVATURE (HESSIAN) — INTRACTABLE FOR SYMBOLIC DIFF
 # ==========================================================================
-
 section("7. CURVATURE — INTRACTABLE FOR SYMBOLIC DIFF")
 
-# Sphere curvature should be constant: mean = 1/r, gaussian = 1/r²
-# At radius 5: mean ≈ 0.2, gaussian ≈ 0.04
-curv_sphere = curvature(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere mean curvature ≈ 1/R", abs(curv_sphere.mean - 0.2) < 0.02)
-test("Sphere Gaussian curvature ≈ 1/R²", abs(curv_sphere.gaussian - 0.04) < 0.01)
-test("Sphere principal curvatures equal", abs(curv_sphere.k1 - curv_sphere.k2) < 0.02)
+# Sphere: mean ≈ 1/R = 0.2, Gaussian ≈ 1/R² = 0.04
+# Both principal curvatures = 1/R → equal
+curv = curvature(machine, :Sphere, [5.0, 0.0, 0.0])
+test("Sphere mean curvature ≈ 1/R=0.2",  abs(curv.mean - 0.2) < 0.02)
+test("Sphere Gaussian curv ≈ 1/R²=0.04", abs(curv.gaussian - 0.04) < 0.01)
+test("Sphere principal curvatures equal", abs(curv.k1 - curv.k2) < 0.02)
+test("Sphere k1 ≈ 0.2",                  abs(curv.k1 - 0.2) < 0.02)
 
-# Torus curvature: varies by position
+# Torus: at outer equator [10,0,0], surface is on tube outer edge
+# Use a surface point: [10,0,0] is at major radius + minor radius = on surface
 curv_torus = curvature(machine, :Torus, [10.0, 0.0, 0.0])
-test("Torus curvature computed", !isnan(curv_sphere.mean) && !isnan(curv_sphere.gaussian))
+test("Torus mean curvature computed",     !isnan(curv_torus.mean))
+test("Torus Gaussian curvature computed", !isnan(curv_torus.gaussian))
 
-# Gyroid curvature: COMPLETELY intractable symbolically
+# Gyroid: minimal surface → mean curvature should be ≈ 0
 curv_gyroid = curvature(machine, :Gyroid, [1.0, 1.0, 1.0])
-test("Gyroid mean curvature computed", !isnan(curv_gyroid.mean))
-test("Gyroid Gaussian curvature computed", !isnan(curv_gyroid.gaussian))
+test("Gyroid curvature no NaN",           !isnan(curv_gyroid.mean))
+test("Gyroid curvature finite",           !isinf(curv_gyroid.mean))
 
-# TwistedTorus curvature: nested trig composition — symbolic Hessian nightmare
+# Minimal surface property: mean curvature at origin ≈ 0
+curv_gyroid_origin = curvature(machine, :Gyroid, [0.1, 0.1, 0.1])
+test("Gyroid mean curvature ≈ 0 (minimal surface)", abs(curv_gyroid_origin.mean) < 0.5)
+
+# TwistedTorus: nested trig composition — symbolic Hessian nightmare
 curv_twisted = curvature(machine, :TwistedTorus, [10.0, 0.0, 0.0])
-test("TwistedTorus curvature computed", !isnan(curv_twisted.mean))
+test("TwistedTorus curvature computed",   !isnan(curv_twisted.mean))
+
+# Zero gradient → should throw for curvature
+test_throws("Curvature at zero-gradient throws", "ZERO GRADIENT",
+    () -> curvature(machine, :Sphere, [0.0, 0.0, 0.0]))
 
 # ==========================================================================
-# TEST SECTION 8: LAPLACIAN AND DIVERGENCE
+# SECTION 8: LAPLACIAN AND DIVERGENCE
 # ==========================================================================
-
 section("8. LAPLACIAN / DIVERGENCE")
 
-# Sphere laplacian at surface
-lapl_sphere = laplacian(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere Laplacian computed", !isnan(lapl_sphere) && !isinf(lapl_sphere))
+lapl = laplacian(machine, :Sphere, [5.0, 0.0, 0.0])
+test("Sphere Laplacian computed",     !isnan(lapl) && !isinf(lapl))
 
-# Divergence = Laplacian for scalar fields
-div_sphere = divergence(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Divergence equals Laplacian", isapprox(div_sphere, lapl_sphere; atol=1e-10))
+div_val = divergence(machine, :Sphere, [5.0, 0.0, 0.0])
+test("Divergence == Laplacian",       isapprox(div_val, lapl; atol=1e-10))
 
-# Gyroid Laplacian
 lapl_gyroid = laplacian(machine, :Gyroid, [1.0, 1.0, 1.0])
-test("Gyroid Laplacian computed", !isnan(lapl_gyroid))
+test("Gyroid Laplacian computed",     !isnan(lapl_gyroid))
+
+lapl_twisted = laplacian(machine, :TwistedTorus, [10.0, 0.0, 0.0])
+test("TwistedTorus Laplacian computed", !isnan(lapl_twisted))
+
+# Plane has Laplacian = 0 (linear function)
+lapl_plane = laplacian(machine_new, :Plane, [1.0, 2.0, 3.0])
+test("Plane Laplacian ≈ 0",           abs(lapl_plane) < 0.01)
 
 # ==========================================================================
-# TEST SECTION 9: BOOLEAN OPERATIONS (CSG)
+# SECTION 9: BOOLEAN OPERATIONS — CSG
 # ==========================================================================
-
 section("9. BOOLEAN OPERATIONS — DERIVATIVE DISCONTINUITY TERRITORY")
 
-# Create two overlapping spheres
 machine_csg = AntikytheraMap(0.001)
 machine_csg.throttle_clamp = 0.5
 cast_single!(machine_csg, :A, "sphere", [3.0])
@@ -263,250 +330,407 @@ cast_single!(machine_csg, :B, "sphere", [3.0])
 
 # Union
 boolean_union!(machine_csg, :UnionAB, :A, :B)
-test("Union created", haskey(machine_csg.gears, :UnionAB))
-union_val = probe(machine_csg, :UnionAB, [0.0, 0.0, 0.0])
-test("Union probe works", !isnan(union_val))
-union_grad = gradient(machine_csg, :UnionAB, [0.0, 0.0, 0.0])
-test("Union gradient computed", !any(isnan, union_grad))
+test("Union created",              haskey(machine_csg.gears, :UnionAB))
+u_val = probe(machine_csg, :UnionAB, [0.0,0.0,0.0])
+test("Union probe at origin",      !isnan(u_val) && u_val < 0)
+u_grad = gradient(machine_csg, :UnionAB, [3.0,0.0,0.0])
+test("Union gradient computed",    !any(isnan, u_grad))
 
 # Intersect
 boolean_intersect!(machine_csg, :IntersectAB, :A, :B)
-test("Intersect created", haskey(machine_csg.gears, :IntersectAB))
-inter_val = probe(machine_csg, :IntersectAB, [0.0, 0.0, 0.0])
-test("Intersect probe works", !isnan(inter_val))
+test("Intersect created",          haskey(machine_csg.gears, :IntersectAB))
+i_val = probe(machine_csg, :IntersectAB, [0.0,0.0,0.0])
+test("Intersect probe works",      !isnan(i_val))
 
 # Subtract
 boolean_subtract!(machine_csg, :SubtractAB, :A, :B)
-test("Subtract created", haskey(machine_csg.gears, :SubtractAB))
+test("Subtract created",           haskey(machine_csg.gears, :SubtractAB))
 
-# Gradient at the min/max junction — symbolic AD DIES here
-# We just probe it and it works
-junction_point = [2.5, 0.0, 0.0]  # Near where the two spheres meet
-junction_grad = gradient(machine_csg, :UnionAB, junction_point)
-test("Gradient through CSG junction", !any(isnan, junction_grad) && !any(isinf, junction_grad))
+# Gradient at min/max junction (the intractable point for symbolic AD)
+junction_grad = gradient(machine_csg, :UnionAB, [2.9, 0.0, 0.0])
+test("Gradient through CSG junction no NaN/Inf",
+     !any(isnan, junction_grad) && !any(isinf, junction_grad))
+
+# Curvature through boolean (extra brutal for symbolic diff)
+curv_union = curvature(machine_csg, :UnionAB, [3.0, 0.0, 0.0])
+test("Curvature through Union computed", !isnan(curv_union.mean))
+
+# Nested boolean chain
+cast_single!(machine_csg, :C, "sphere", [2.0])
+boolean_union!(machine_csg, :UnionBC, :B, :C)
+boolean_subtract!(machine_csg, :ComplexShape, :UnionAB, :UnionBC)
+test("Nested boolean created",     haskey(machine_csg.gears, :ComplexShape))
+complex_val = probe(machine_csg, :ComplexShape, [0.0, 0.0, 0.0])
+test("Nested boolean probe works", !isnan(complex_val))
 
 # ==========================================================================
-# TEST SECTION 10: SMOOTH BLEND
+# SECTION 10: SMOOTH BLEND
 # ==========================================================================
-
 section("10. SMOOTH BLEND — NO CLOSED-FORM GRADIENT")
 
-blend!(machine_csg, :BlendedAB, :A, :B, 2.0)
-test("Blend created", haskey(machine_csg.gears, :BlendedAB))
+blend!(machine_csg, :BlendAB, :A, :B, 2.0)
+test("Blend created",                    haskey(machine_csg.gears, :BlendAB))
 
-# Probe in the blend region
-blend_point = [1.5, 0.0, 0.0]  # In the smooth transition zone
-blend_val = probe(machine_csg, :BlendedAB, blend_point)
-test("Blend probe works", !isnan(blend_val))
+bval = probe(machine_csg, :BlendAB, [1.5, 0.0, 0.0])
+test("Blend probe in fillet zone",       !isnan(bval))
 
-blend_grad = gradient(machine_csg, :BlendedAB, blend_point)
-test("Blend gradient computed", !any(isnan, blend_grad))
+bgrad = gradient(machine_csg, :BlendAB, [1.5, 0.0, 0.0])
+test("Blend gradient computed",          !any(isnan, bgrad))
 
-# Curvature in blend region — this is the REAL test
-blend_curv = curvature(machine_csg, :BlendedAB, blend_point)
-test("Curvature in blend region computed", !isnan(blend_curv.mean))
+bcurv = curvature(machine_csg, :BlendAB, [3.0, 0.0, 0.0])
+test("Blend curvature in fillet computed", !isnan(bcurv.mean))
+
+# k=0 blend degenerates to hard boolean
+blend!(machine_csg, :HardBlend, :A, :B, 0.0)
+hval = probe(machine_csg, :HardBlend, [0.0, 0.0, 0.0])
+test("k=0 blend = hard boolean",         isapprox(hval, u_val; atol=0.001))
+
+# Negative k rejected
+test_throws("Negative blend radius rejected", "BLEND RADIUS",
+    () -> blend!(machine_csg, :BadBlend, :A, :B, -1.0))
 
 # ==========================================================================
-# TEST SECTION 11: MORPH
+# SECTION 11: MORPH — INTERMEDIATE STATES WITH NO NAME
 # ==========================================================================
-
 section("11. MORPH — INTERMEDIATE STATES WITH NO NAME")
 
 machine_morph = AntikytheraMap(0.001)
 machine_morph.throttle_clamp = 0.5
-cast_single!(machine_morph, :MorphSphere, "sphere", [5.0])
+cast_single!(machine_morph, :MS, "sphere", [5.0])
 
-# Morph to larger radius
-morph!(machine_morph, :MorphSphere, [10.0], 0.0)  # t=0, no change
-test("Morph t=0 unchanged", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 5.0; atol=0.01))
+morph!(machine_morph, :MS, [10.0], 0.0)
+test("Morph t=0 → unchanged",       isapprox(machine_morph.gears[:MS].teeth_params[1], 5.0; atol=0.001))
 
-morph!(machine_morph, :MorphSphere, [10.0], 1.0)  # t=1, full change
-test("Morph t=1 complete", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 10.0; atol=0.01))
+morph!(machine_morph, :MS, [10.0], 1.0)
+test("Morph t=1 → target",          isapprox(machine_morph.gears[:MS].teeth_params[1], 10.0; atol=0.001))
 
-# Reset and test intermediate
-machine_morph.gears[:MorphSphere].teeth_params[1] = 5.0
-morph!(machine_morph, :MorphSphere, [10.0], 0.5)  # t=0.5, halfway
-test("Morph t=0.5 intermediate", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 7.5; atol=0.01))
+machine_morph.gears[:MS].teeth_params[1] = 5.0
+morph!(machine_morph, :MS, [10.0], 0.5)
+test("Morph t=0.5 → midpoint",      isapprox(machine_morph.gears[:MS].teeth_params[1], 7.5; atol=0.001))
+
+machine_morph.gears[:MS].teeth_params[1] = 5.0
+morph!(machine_morph, :MS, [10.0], 0.25)
+test("Morph t=0.25 → quarter",      isapprox(machine_morph.gears[:MS].teeth_params[1], 6.25; atol=0.001))
+
+# Gradient still works after morphing
+g_morphed = gradient(machine_morph, :MS, [7.5, 0.0, 0.0])
+test("Gradient on morphed gear works",    !any(isnan, g_morphed))
+test("Gradient on morphed gear |g| ≈ 1", isapprox(norm(g_morphed), 1.0; atol=0.05))
+
+# Invalid morph params
+test_throws("Morph t<0 rejected",    "MORPH t", () -> morph!(machine_morph, :MS, [10.0], -0.1))
+test_throws("Morph t>1 rejected",    "MORPH t", () -> morph!(machine_morph, :MS, [10.0], 1.5))
+test_throws("Morph wrong param count rejected", "PARAMS",
+    () -> morph!(machine_morph, :MS, [10.0, 3.0], 0.5))
+
+# Torus morph: 2 params
+cast_single!(machine_morph, :MT, "torus", [8.0, 2.0])
+morph!(machine_morph, :MT, [12.0, 3.0], 0.5)
+test("Torus morph: major radius", isapprox(machine_morph.gears[:MT].teeth_params[1], 10.0; atol=0.001))
+test("Torus morph: minor radius", isapprox(machine_morph.gears[:MT].teeth_params[2], 2.5; atol=0.001))
 
 # ==========================================================================
-# TEST SECTION 12: FLOW (STREAMLINE TRACING)
+# SECTION 12: FLOW — STREAMLINE TRACING
 # ==========================================================================
-
 section("12. FLOW — STREAMLINE THROUGH COMPLEX TOPOLOGY")
 
-# Flow descent on sphere — should reach surface
-flow_path = flow(machine, :Sphere, [0.0, 0.0, 0.0]; steps=50, step_size=0.5, direction=:descent)
-test("Flow descent generated path", length(flow_path) > 1)
-test("Flow descent reaches surface", abs(probe(machine, :Sphere, flow_path[end])) < 0.5)
+# Descent from outside sphere → should reach surface
+flow_outside = flow(machine, :Sphere, [10.0, 0.0, 0.0]; steps=100, step_size=0.3, direction=:descent)
+test("Flow descent from outside generates path", length(flow_outside) > 1)
+test("Flow descent reaches sphere surface",      abs(probe(machine, :Sphere, flow_outside[end])) < 0.05)
 
-# Flow on gyroid — NO ANALYTIC SOLUTION EXISTS
+# Ascent from inside sphere → should reach surface
+flow_inside = flow(machine, :Sphere, [0.0, 0.0, 0.0]; steps=100, step_size=0.3, direction=:ascent)
+test("Flow ascent from inside generates path",   length(flow_inside) > 1)
+test("Flow ascent reaches sphere surface",       abs(probe(machine, :Sphere, flow_inside[end])) < 0.05)
+
+# Descent on TwistedTorus from non-degenerate point
+flow_twisted = flow(machine, :TwistedTorus, [0.0, 0.0, 0.0]; steps=100, step_size=0.3)
+test("Flow on TwistedTorus from origin generates path", length(flow_twisted) > 1)
+test("Flow on TwistedTorus reaches surface",            abs(probe(machine, :TwistedTorus, flow_twisted[end])) < 0.05)
+
+# Gyroid flow
 flow_gyroid = flow(machine, :Gyroid, [2.0, 2.0, 2.0]; steps=100, step_size=0.2)
-test("Flow on Gyroid computed", length(flow_gyroid) > 1)
+test("Flow on Gyroid computed",                  length(flow_gyroid) > 1)
 
-# Flow on TwistedTorus — nested trig topology
-flow_twisted = flow(machine, :TwistedTorus, [0.0, 0.0, 0.0]; steps=50, step_size=0.3)
-test("Flow on TwistedTorus computed", length(flow_twisted) > 1)
+# Flow with explicit direction=:ascent
+flow_ascent = flow(machine, :Sphere, [3.0, 0.0, 0.0]; steps=50, step_size=0.2, direction=:ascent)
+test("Flow ascent generates path",               length(flow_ascent) > 1)
 
 # ==========================================================================
-# TEST SECTION 13: LEVELSET (RAY MARCHING)
+# SECTION 13: LEVELSET (RAY MARCHING)
 # ==========================================================================
-
 section("13. LEVELSET — RAY-SURFACE INTERSECTION")
 
-# Ray toward sphere center
-ray_origin = [15.0, 0.0, 0.0]
-ray_dir = [-1.0, 0.0, 0.0]
-hit_result = levelset(machine, :Sphere, ray_origin, ray_dir)
-test("Ray hits sphere", hit_result.hit)
-test("Ray hit distance correct", isapprox(hit_result.distance, 10.0; atol=0.1))  # 15 - 5 = 10
+# Ray toward sphere (15,0,0) → (-1,0,0): should hit at distance 10
+hit = levelset(machine, :Sphere, [15.0, 0.0, 0.0], [-1.0, 0.0, 0.0])
+test("Ray hits sphere",           hit.hit)
+test("Ray hit distance ≈ 10",     isapprox(hit.distance, 10.0; atol=0.1))
+test("Ray hit point on surface",  abs(probe(machine, :Sphere, hit.point)) < 0.02)
+test("Ray hit step count > 0",    hit.steps > 0)
 
-# Ray away from sphere
-miss_result = levelset(machine, :Sphere, ray_origin, [1.0, 0.0, 0.0]; max_dist=20.0)
-test("Ray misses sphere", !miss_result.hit)
+# Ray away from sphere: should miss
+miss = levelset(machine, :Sphere, [15.0, 0.0, 0.0], [1.0, 0.0, 0.0]; max_dist=20.0)
+test("Ray misses sphere",         !miss.hit)
 
-# Ray through gyroid — multiple potential intersections
-gyroid_ray = levelset(machine, :Gyroid, [0.0, 0.0, -10.0], [0.0, 0.0, 1.0]; max_dist=20.0)
-test("Ray through Gyroid computed", gyroid_ray.steps > 0)
+# Ray through Gyroid: periodic surface, should find intersection
+gyroid_hit = levelset(machine, :Gyroid, [0.0, 0.0, -10.0], [0.0, 0.0, 1.0]; max_dist=20.0)
+test("Gyroid ray result computed", gyroid_hit.steps > 0)
+
+# Torus ray
+torus_hit = levelset(machine, :Torus, [0.0, 0.0, 20.0], [0.0, 0.0, -1.0])
+test("Torus ray computed",         torus_hit.steps > 0)
+
+# Zero direction rejected
+test_throws("Zero ray direction rejected", "ZERO",
+    () -> levelset(machine, :Sphere, [0.0,0.0,0.0], [0.0,0.0,0.0]))
 
 # ==========================================================================
-# TEST SECTION 14: GEODESIC
+# SECTION 14: GEODESIC — APPROXIMATE SURFACE DISTANCE
 # ==========================================================================
-
 section("14. GEODESIC — APPROXIMATE SURFACE DISTANCE")
 
-# Geodesic on sphere surface (should be along great circle ≈ π*r for opposite points)
-geo_result = geodesic(machine, :Sphere, [5.0, 0.0, 0.0], [-5.0, 0.0, 0.0]; max_steps=200)
-test("Geodesic computed", length(geo_result.path) > 1)
-test("Geodesic distance reasonable", geo_result.distance > 0)
+geo = geodesic(machine, :Sphere, [5.0,0.0,0.0], [-5.0,0.0,0.0]; max_steps=300)
+test("Geodesic on sphere computed",    length(geo.path) > 1)
+test("Geodesic distance > 0",         geo.distance > 0)
+# Half-circumference of sphere R=5: π*R ≈ 15.7
+test("Geodesic distance reasonable",  geo.distance > 5.0 && geo.distance < 50.0)
 
-# Geodesic on torus surface
-geo_torus = geodesic(machine, :Torus, [10.0, 0.0, 0.0], [8.0, 2.0, 0.0]; max_steps=300)
-test("Geodesic on Torus computed", length(geo_torus.path) > 1)
+geo_torus = geodesic(machine, :Torus, [10.0,0.0,0.0], [8.0,2.0,0.0]; max_steps=300)
+test("Geodesic on Torus computed",     length(geo_torus.path) > 1)
+test("Geodesic on Torus distance > 0", geo_torus.distance > 0)
+
+geo_gyroid = geodesic(machine, :Gyroid, [1.0,0.0,0.0], [-1.0,0.0,0.0]; max_steps=200)
+test("Geodesic on Gyroid computed",    length(geo_gyroid.path) > 1)
 
 # ==========================================================================
-# TEST SECTION 15: USER-DEFINED SDF
+# SECTION 15: USER-DEFINED SDF — RUNTIME GEOMETRY
 # ==========================================================================
-
 section("15. USER-DEFINED SDF — RUNTIME GEOMETRY")
 
-# Define a custom SDF: a sphere with sin wave distortion
 machine_user = AntikytheraMap(0.001)
 machine_user.throttle_clamp = 0.5
 
-# Simple sphere: sqrt(x²+y²+z²) - r
-user_name = parse_user_sdf!(machine_user, "sqrt(x*x + y*y + z*z) - a", [3.0])
-test("User SDF created", haskey(machine_user.gears, user_name))
+# Sphere as user SDF
+u1 = parse_user_sdf!(machine_user, "sqrt(x*x + y*y + z*z) - a", [3.0])
+test("User SDF created",          haskey(machine_user.gears, u1))
+test("User SDF probe at center",  isapprox(probe(machine_user, u1, [0.0,0.0,0.0]), -3.0; atol=0.1))
+test("User SDF on surface ≈ 0",   abs(probe(machine_user, u1, [3.0,0.0,0.0])) < 0.05)
 
-user_val = probe(machine_user, user_name, [0.0, 0.0, 0.0])
-test("User SDF probe at center", isapprox(user_val, -3.0; atol=0.1))
+u1_grad = gradient(machine_user, u1, [3.0, 0.0, 0.0])
+test("User SDF gradient computed",    !any(isnan, u1_grad))
+test("User SDF gradient |g| ≈ 1",    isapprox(norm(u1_grad), 1.0; atol=0.1))
 
-user_grad = gradient(machine_user, user_name, [3.0, 0.0, 0.0])
-test("User SDF gradient computed", !any(isnan, user_grad))
-test("User SDF gradient magnitude ≈ 1", isapprox(norm(user_grad), 1.0; atol=0.1))
+u1_curv = curvature(machine_user, u1, [3.0, 0.0, 0.0])
+test("User SDF curvature computed",   !isnan(u1_curv.mean))
 
-# More complex: sin wave surface (IMPOSSIBLE to differentiate symbolically in closed form)
-user_name2 = parse_user_sdf!(machine_user, "sin(x) + cos(y) + sin(z)", [])
-test("Complex user SDF created", haskey(machine_user.gears, user_name2))
+# Parametric torus as user SDF: sqrt((sqrt(x^2+z^2)-a)^2 + y^2) - b
+u2 = parse_user_sdf!(machine_user, "sqrt((sqrt(x*x+z*z)-a)^2+y*y)-b", [6.0, 1.5])
+test("User torus SDF created",        haskey(machine_user.gears, u2))
+u2_grad = gradient(machine_user, u2, [7.5, 0.0, 0.0])
+test("User torus gradient no NaN",    !any(isnan, u2_grad))
 
-complex_grad = gradient(machine_user, user_name2, [1.0, 1.0, 1.0])
-test("Complex user SDF gradient", !any(isnan, complex_grad))
+# No-param SDF: sin wave surface
+u3 = parse_user_sdf!(machine_user, "sin(x) + cos(y) + sin(z)", [])
+test("No-param user SDF created",     haskey(machine_user.gears, u3))
+u3_grad = gradient(machine_user, u3, [1.0, 1.0, 1.0])
+test("No-param SDF gradient",         !any(isnan, u3_grad))
+u3_curv = curvature(machine_user, u3, [1.0, 1.0, 1.0])
+test("No-param SDF curvature",        !isnan(u3_curv.mean))
 
-complex_curv = curvature(machine_user, user_name2, [1.0, 1.0, 1.0])
-test("Complex user SDF curvature", !isnan(complex_curv.mean))
+# Ellipsoid SDF
+u4 = parse_user_sdf!(machine_user, "sqrt(x*x/(a*a)+y*y/(b*b)+z*z/(b*b))-1", [4.0, 2.0])
+test("User ellipsoid SDF created",    haskey(machine_user.gears, u4))
 
-# ==========================================================================
-# TEST SECTION 16: USER-DEFINED DIFFERENTIAL OPERATORS
-# ==========================================================================
+# Multiple params
+u5 = parse_user_sdf!(machine_user, "sqrt(x*x+y*y+z*z) - a - b*0.1", [3.0, 1.0])
+test("Multi-param user SDF created",  haskey(machine_user.gears, u5))
 
-section("16. USER-DEFINED DIFFERENTIALS — ARBITRARY DERIVATIVES")
-
-# Parse diff specs
-spec_dx = parse_diff_spec("dx")
-test("Parse dx", spec_dx.specs == [(1, 1)] && spec_dx.total_order == 1)
-
-spec_d2x = parse_diff_spec("d2x")
-test("Parse d2x", spec_d2x.specs == [(1, 2)] && spec_d2x.total_order == 2)
-
-spec_dxdz = parse_diff_spec("dxdz")
-test("Parse dxdz", spec_dxdz.specs == [(1, 1), (3, 1)] && spec_dxdz.total_order == 2)
-
-spec_d3xd2z = parse_diff_spec("d3xd2z")
-test("Parse d3xd2z", spec_d3xd2z.total_order == 5)
-
-# Apply derivatives
-diff_dx = apply_differential(machine, :Sphere, [5.0, 0.0, 0.0], spec_dx)
-test("dx computed", !isnan(diff_dx))
-
-diff_d2x = apply_differential(machine, :Sphere, [5.0, 0.0, 0.0], spec_d2x)
-test("d²x computed", !isnan(diff_d2x))
-
-# High-order derivative: d⁴f/dx²dz²
-spec_d2xd2z = parse_diff_spec("d2xd2z")
-diff_d2xd2z = apply_differential(machine, :Gyroid, [1.0, 1.0, 1.0], spec_d2xd2z)
-test("d⁴f/dx²dz² computed on Gyroid", !isnan(diff_d2xd2z) && !isinf(diff_d2xd2z))
-
-# Absolutely insane derivative: d⁶f/dx³dy²dz
-spec_insane = parse_diff_spec("d3xd2ydz")
-diff_insane = apply_differential(machine, :TwistedTorus, [10.0, 0.0, 0.0], spec_insane)
-test("d⁶f/dx³dy²dz on TwistedTorus — SYMBOLIC DIFF WOULD EXPLODE", 
-    !isnan(diff_insane) && !isinf(diff_insane))
-
-# ==========================================================================
-# TEST SECTION 17: ERROR HANDLING
-# ==========================================================================
-
-section("17. ERROR HANDLING")
-
-# Missing gear
-test_throws("Missing gear rejected", "MISSING", 
-    () -> probe(machine, :NonExistent, [0.0, 0.0, 0.0]))
-
-# Zero gradient (flat region)
-test_throws("Zero gradient rejected", "ZERO", 
-    () -> surface_normal(machine, :Sphere, [0.0, 0.0, 0.0]))
-
-# Invalid diff spec
-test_throws("Invalid diff spec rejected", "INVALID", 
-    () -> parse_diff_spec("xyz"))
-
-# Empty user SDF
-test_throws("Empty user SDF rejected", "EMPTY", 
+# Empty expression rejected
+test_throws("Empty SDF rejected", "EMPTY",
     () -> parse_user_sdf!(machine_user, "", [1.0]))
 
 # ==========================================================================
-# TEST SECTION 18: PERFORMANCE / STRESS
+# SECTION 16: USER-DEFINED DIFFERENTIAL OPERATORS
 # ==========================================================================
+section("16. USER-DEFINED DIFFERENTIALS — ARBITRARY DERIVATIVES")
 
-section("18. PERFORMANCE STRESS TEST")
+# Spec parsing
+spec_dx    = parse_diff_spec("dx")
+spec_dy    = parse_diff_spec("dy")
+spec_dz    = parse_diff_spec("dz")
+spec_d2x   = parse_diff_spec("d2x")
+spec_dxdz  = parse_diff_spec("dxdz")
+spec_d3xd2z = parse_diff_spec("d3xd2z")
 
-# Many gradient probes
-start_time = time()
-for i in 1:100
+test("Parse dx",     spec_dx.specs    == [(1,1)] && spec_dx.total_order    == 1)
+test("Parse dy",     spec_dy.specs    == [(2,1)] && spec_dy.total_order    == 1)
+test("Parse dz",     spec_dz.specs    == [(3,1)] && spec_dz.total_order    == 1)
+test("Parse d2x",    spec_d2x.specs   == [(1,2)] && spec_d2x.total_order   == 2)
+test("Parse dxdz",   spec_dxdz.specs  == [(1,1),(3,1)] && spec_dxdz.total_order == 2)
+test("Parse d3xd2z total_order=5", spec_d3xd2z.total_order == 5)
+
+# Numerical correctness: df/dx of sphere at surface = gradient_x
+diff_dx = apply_differential(machine, :Sphere, [5.0, 0.0, 0.0], spec_dx)
+test("dx matches gradient_x",   isapprox(diff_dx, g_surf[1]; atol=0.01))
+
+diff_dy = apply_differential(machine, :Sphere, [5.0, 0.0, 0.0], spec_dy)
+test("dy matches gradient_y",   isapprox(diff_dy, g_surf[2]; atol=0.01))
+
+# d²x on sphere at surface
+diff_d2x = apply_differential(machine, :Sphere, [5.0, 0.0, 0.0], spec_d2x)
+test("d²x computed, finite",    !isnan(diff_d2x) && !isinf(diff_d2x))
+
+# Mixed: dxdz on Gyroid
+diff_dxdz = apply_differential(machine, :Gyroid, [1.0, 1.0, 1.0], spec_dxdz)
+test("d²f/dxdz on Gyroid finite",  !isnan(diff_dxdz) && !isinf(diff_dxdz))
+
+# High order: d⁴f/dx²dz² on Gyroid
+spec_d2xd2z = parse_diff_spec("d2xd2z")
+diff_4th = apply_differential(machine, :Gyroid, [1.0, 1.0, 1.0], spec_d2xd2z)
+test("d⁴f/dx²dz² on Gyroid finite", !isnan(diff_4th) && !isinf(diff_4th))
+
+# Insane: d⁶f/dx³dy²dz on TwistedTorus — symbolic diff would EXPLODE
+spec_insane = parse_diff_spec("d3xd2ydz")
+diff_6th = apply_differential(machine, :TwistedTorus, [10.0, 0.0, 0.0], spec_insane)
+test("d⁶f/dx³dy²dz on TwistedTorus — SYMBOLIC DIFF WOULD EXPLODE",
+    !isnan(diff_6th) && !isinf(diff_6th))
+
+# d⁵ on user SDF: completely custom
+spec_d5 = parse_diff_spec("d2xd2ydz")
+diff_user = apply_differential(machine_user, u3, [1.0, 1.0, 1.0], spec_d5)
+test("d⁵ on no-param user SDF",  !isnan(diff_user) && !isinf(diff_user))
+
+# Invalid spec rejected
+test_throws("Invalid spec 'xyz' rejected", "INVALID",
+    () -> parse_diff_spec("xyz"))
+test_throws("Empty spec rejected", "EMPTY",
+    () -> parse_diff_spec(""))
+
+# ==========================================================================
+# SECTION 17: ERROR HANDLING — ALL MACHINE CRUNCHES
+# ==========================================================================
+section("17. ERROR HANDLING")
+
+test_throws("Missing gear throws",        "MISSING",
+    () -> probe(machine, :Nonexistent, [0.0,0.0,0.0]))
+test_throws("Dimension mismatch 2D→3D",  "3D",
+    () -> probe(machine, :Sphere, [0.0,0.0]))
+test_throws("Throttle shut throws",       "THROTTLE",
+    () -> begin
+        m_test = AntikytheraMap(0.001)
+        jit_cast_gears!(m_test)
+        probe(m_test, :Sphere, [5.0,0.0,0.0])
+    end)
+test_throws("Zero gradient normal throws", "ZERO",
+    () -> surface_normal(machine, :Sphere, [0.0,0.0,0.0]))
+test_throws("Zero gradient curvature throws", "ZERO GRADIENT",
+    () -> curvature(machine, :Sphere, [0.0,0.0,0.0]))
+test_throws("Invalid diff spec throws",   "INVALID",
+    () -> parse_diff_spec("xyz"))
+test_throws("Empty SDF expr throws",      "EMPTY",
+    () -> parse_user_sdf!(machine_user, "", [1.0]))
+test_throws("Morph out-of-range t throws", "MORPH t",
+    () -> morph!(machine_morph, :MS, [10.0], 2.0))
+test_throws("Zero ray direction throws",  "ZERO",
+    () -> levelset(machine, :Sphere, [0.0,0.0,0.0], [0.0,0.0,0.0]))
+test_throws("Negative blend radius throws", "BLEND RADIUS",
+    () -> blend!(machine_csg, :X, :A, :B, -0.5))
+
+# MachineCrunch has message and context
+e = try
+    probe(machine, :Nonexistent, [0.0,0.0,0.0])
+    nothing
+catch ex
+    ex
+end
+test("MachineCrunch has message field",  e isa MachineCrunch && !isempty(e.message))
+test("MachineCrunch has context field",  e isa MachineCrunch && !isempty(e.context))
+
+# ==========================================================================
+# SECTION 18: PERFORMANCE / STRESS TESTS
+# ==========================================================================
+section("18. PERFORMANCE STRESS TESTS")
+
+# 100 gradient probes on Gyroid
+t0 = time()
+for _ in 1:100
     gradient(machine, :Gyroid, [rand(), rand(), rand()])
 end
-elapsed = time() - start_time
-test("100 gradient probes on Gyroid under 1 second", elapsed < 1.0, @sprintf("%.3fs", elapsed))
+elapsed = time() - t0
+test("100 Gyroid gradients < 1 second", elapsed < 1.0, @sprintf("%.3fs", elapsed))
 
-# Many curvature probes (more expensive)
-start_time = time()
-for i in 1:20
-    curvature(machine, :TwistedTorus, [rand()*10, rand(), rand()])
+# 20 curvature probes on TwistedTorus
+t0 = time()
+for _ in 1:20
+    curvature(machine, :TwistedTorus, [rand()*10.0+5.0, rand()*2.0, rand()])
 end
-elapsed = time() - start_time
-test("20 curvature probes on TwistedTorus under 2 seconds", elapsed < 2.0, @sprintf("%.3fs", elapsed))
+elapsed = time() - t0
+test("20 TwistedTorus curvatures < 2 seconds", elapsed < 2.0, @sprintf("%.3fs", elapsed))
 
-# Deep CSG chain
+# 50 levelset ray marches
+t0 = time()
+for _ in 1:50
+    levelset(machine, :Sphere, [15.0,0.0,0.0], [-1.0,0.0,0.0])
+end
+elapsed = time() - t0
+test("50 levelset ray marches < 2 seconds", elapsed < 2.0, @sprintf("%.3fs", elapsed))
+
+# Deep CSG chain: 10 unions
 machine_deep = AntikytheraMap(0.001)
 machine_deep.throttle_clamp = 0.5
 cast_single!(machine_deep, :Base, "sphere", [5.0])
-current_base = :Base
+deep_current = :Base   # top-level variable
 for i in 1:10
     cast_single!(machine_deep, Symbol("S$(i)"), "sphere", [Float64(i)])
-    union_name = Symbol("U$(i)")
-    boolean_union!(machine_deep, union_name, current_base, Symbol("S$(i)"))
-    global current_base = union_name  # Chain the union
+    uname = Symbol("U$(i)")
+    boolean_union!(machine_deep, uname, deep_current, Symbol("S$(i)"))
+    global deep_current = uname  # update outer scope
 end
-test("Deep CSG chain created", length(machine_deep.gears) > 20)
+test("Deep CSG chain 10 unions created",   length(machine_deep.gears) >= 21)
+deep_val = probe(machine_deep, deep_current, [0.0,0.0,0.0])
+test("Deep CSG chain probe works",         !isnan(deep_val))
+deep_grad = gradient(machine_deep, deep_current, [5.0,0.0,0.0])
+test("Deep CSG chain gradient works",      !any(isnan, deep_grad))
+
+# Query count is tracked
+before = machine.query_count
+for _ in 1:10
+    probe(machine, :Sphere, [5.0,0.0,0.0])
+end
+test("Query count tracks 10 probes", machine.query_count == before + 10)
+
+# ==========================================================================
+# SECTION 19: INTEGRATION — FULL PIPELINE
+# ==========================================================================
+section("19. INTEGRATION — FULL PIPELINE")
+
+machine_int = AntikytheraMap(0.001)
+machine_int.throttle_clamp = 0.5
+jit_cast_gears!(machine_int)
+
+# Create complex geometry: union of sphere and torus, blended with gyroid
+boolean_union!(machine_int, :SphTor, :Sphere, :Torus)
+blend!(machine_int, :SphTorGyr, :SphTor, :Gyroid, 0.5)
+
+test("Complex composed shape created",  haskey(machine_int.gears, :SphTorGyr))
+cp = probe(machine_int, :SphTorGyr, [5.0, 0.0, 0.0])
+test("Complex shape probe works",       !isnan(cp))
+cg = gradient(machine_int, :SphTorGyr, [5.0, 0.0, 0.0])
+test("Complex shape gradient works",    !any(isnan, cg))
+cc = curvature(machine_int, :SphTorGyr, [5.0, 0.0, 0.0])
+test("Complex shape curvature works",   !isnan(cc.mean))
+cl = levelset(machine_int, :SphTorGyr, [20.0, 0.0, 0.0], [-1.0,0.0,0.0])
+test("Complex shape ray march works",   cl.steps > 0)
+
+# User-defined SDF → full pipeline
+machine_int2 = AntikytheraMap(0.001)
+machine_int2.throttle_clamp = 0.5
+u_name = parse_user_sdf!(machine_int2, "sin(x)*cos(y) - a*z", [0.5])
+boolean_union!(machine_int2, :UserUnion, u_name, u_name)
+test("User SDF → boolean union created", haskey(machine_int2.gears, :UserUnion))
+uu_val = probe(machine_int2, :UserUnion, [1.0,1.0,0.0])
+test("User SDF → union probe works",     !isnan(uu_val))
 
 # ==========================================================================
 # FINAL SUMMARY
@@ -527,14 +751,11 @@ if TEST.failed > 0
 end
 
 println("\n" * "═"^64)
-
 if TEST.failed == 0
     println("  ⚙️  ALL TESTS PASSED — THE MACHINE LIVES  ⚙️")
 else
     println("  ⚠️  SOME TESTS FAILED — CHECK THE MACHINE")
 end
-
 println("═"^64 * "\n")
 
-# Return exit code
 exit(TEST.failed > 0 ? 1 : 0)

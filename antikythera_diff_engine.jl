@@ -197,14 +197,82 @@ end
 # GEAR LIBRARY REGISTRY
 # GRUG: Menu of available cookie cutters.
 # ----------------------------------------------------------
+# ----------------------------------------------------------
+# CONE: A pointy shape.
+# GRUG: Like mountain but more stabby.
+# params[1] = half-angle in radians, params[2] = height
+# ----------------------------------------------------------
+function sdf_cone(p::Vector{Float64}, params::Vector{Float64})
+    length(p) == 3 || throw(MachineCrunch("CONE NEEDS 3D POINT.", "sdf_cone"))
+    half_angle, h = params[1], params[2]
+    q = [sqrt(p[1]^2 + p[3]^2), p[2]]
+    sin_a, cos_a = sin(half_angle), cos(half_angle)
+    k = dot(q, [-sin_a, cos_a])
+    if k < 0.0
+        return norm(q)
+    end
+    if k > norm(q)
+        return norm(q .- [0.0, h])
+    end
+    return dot(q, [cos_a, sin_a])
+end
+
+# ----------------------------------------------------------
+# CAPSULE: A pill shape. Cylinder with hemispherical caps.
+# GRUG: Like fat ant. Or medicine pill.
+# params[1] = radius, params[2] = half-height of cylinder
+# ----------------------------------------------------------
+function sdf_capsule(p::Vector{Float64}, params::Vector{Float64})
+    length(p) == 3 || throw(MachineCrunch("CAPSULE NEEDS 3D POINT.", "sdf_capsule"))
+    r, h = params[1], params[2]
+    q = [norm([p[1], p[3]]), p[2]]
+    q[2] -= clamp(q[2], -h, h)
+    return norm(q) - r
+end
+
+# ----------------------------------------------------------
+# PLANE: An infinite flat surface.
+# GRUG: Like world before Grug dug first hole.
+# params[1:3] = normal direction, params[4] = offset
+# ----------------------------------------------------------
+function sdf_plane(p::Vector{Float64}, params::Vector{Float64})
+    length(p) == 3 || throw(MachineCrunch("PLANE NEEDS 3D POINT.", "sdf_plane"))
+    n = params[1:3]
+    n_norm = norm(n)
+    n_norm < 1e-12 && throw(MachineCrunch("PLANE NORMAL CANNOT BE ZERO.", "sdf_plane"))
+    return dot(p, n ./ n_norm) - params[4]
+end
+
+# ----------------------------------------------------------
+# ELLIPSOID: A stretched ball.
+# GRUG: Like sphere that ate too much in one direction.
+# params[1:3] = semi-axes (a, b, c)
+# ----------------------------------------------------------
+function sdf_ellipsoid(p::Vector{Float64}, params::Vector{Float64})
+    length(p) == 3 || throw(MachineCrunch("ELLIPSOID NEEDS 3D POINT.", "sdf_ellipsoid"))
+    a, b, c = params[1], params[2], params[3]
+    k0 = norm([p[1]/a, p[2]/b, p[3]/c])
+    k1 = norm([p[1]/(a*a), p[2]/(b*b), p[3]/(c*c)])
+    k0 < 1e-12 && return -min(a, b, c)
+    return k0 * (k0 - 1.0) / k1
+end
+
+# ----------------------------------------------------------
+# GEAR LIBRARY REGISTRY
+# GRUG: Menu of available cookie cutters.
+# ----------------------------------------------------------
 const GEAR_LIBRARY = Dict{String, Tuple{Function, Vector{Float64}, Int, String}}(
-    "sphere"        => (sdf_sphere,        [5.0],            3, "Round rock. params: [radius]"),
-    "torus"         => (sdf_torus,         [8.0, 2.0],       3, "Donut. params: [major_R, minor_r]"),
-    "box"           => (sdf_box,           [3.0, 4.0, 5.0],  3, "Brick. params: [half_w, half_h, half_d]"),
-    "cylinder"      => (sdf_cylinder,      [3.0, 5.0],       3, "Tube. params: [radius, half_height]"),
-    "gyroid"        => (sdf_gyroid,        [6.28, 0.0],      3, "Magic tiling surface. params: [scale, thickness]"),
-    "schwarz"       => (sdf_schwarz_p,     [6.28, 0.0],      3, "Schwarz P surface. params: [scale, thickness]"),
-    "twisted_torus" => (sdf_twisted_torus, [8.0, 2.0, 1.5],  3, "Wrung donut. params: [major_R, minor_r, twist]"),
+    "sphere"        => (sdf_sphere,        [5.0],                3, "Round rock. params: [radius]"),
+    "torus"         => (sdf_torus,         [8.0, 2.0],           3, "Donut. params: [major_R, minor_r]"),
+    "box"           => (sdf_box,           [3.0, 4.0, 5.0],      3, "Brick. params: [half_w, half_h, half_d]"),
+    "cylinder"      => (sdf_cylinder,      [3.0, 5.0],           3, "Tube. params: [radius, half_height]"),
+    "gyroid"        => (sdf_gyroid,        [6.28, 0.0],          3, "Magic tiling surface. params: [scale, thickness]"),
+    "schwarz"       => (sdf_schwarz_p,     [6.28, 0.0],          3, "Schwarz P surface. params: [scale, thickness]"),
+    "twisted_torus" => (sdf_twisted_torus, [8.0, 2.0, 1.5],      3, "Wrung donut. params: [major_R, minor_r, twist]"),
+    "cone"          => (sdf_cone,          [0.4, 5.0],           3, "Pointy rock. params: [half_angle_rad, height]"),
+    "capsule"       => (sdf_capsule,       [2.0, 4.0],           3, "Pill shape. params: [radius, half_height]"),
+    "plane"         => (sdf_plane,         [0.0, 1.0, 0.0, 0.0], 3, "Infinite flat. params: [nx, ny, nz, offset]"),
+    "ellipsoid"     => (sdf_ellipsoid,     [4.0, 2.0, 3.0],      3, "Stretched ball. params: [a, b, c semi-axes]"),
 )
 
 # ==========================================================================
@@ -654,22 +722,59 @@ function flow(am::AntikytheraMap, gear_name::Symbol, start::Vector{Float64};
     push!(path, copy(start))
     current = copy(start)
     
+    # GRUG: If start has zero gradient (e.g. exact centre of sphere),
+    # perturb slightly so we can actually walk somewhere.
+    g_check = gradient(am, gear_name, current)
+    if norm(g_check) < 1e-10
+        # Nudge along each axis until we find a direction
+        nd = gear.ndims
+        for d in 1:nd
+            perturbed = copy(current)
+            perturbed[d] += am.slack * 100
+            gp = gradient(am, gear_name, perturbed)
+            if norm(gp) > 1e-10
+                current = perturbed
+                push!(path, copy(current))
+                break
+            end
+        end
+    end
+    
+    prev_sdf = gear.shape_logic(current, gear.teeth_params)
     for i in 1:steps
         g = gradient(am, gear_name, current)
         g_norm = norm(g)
-        
-        # GRUG: If gradient is flat, we're stuck. Stop walking.
         if g_norm < 1e-10
             break
         end
-        
-        # GRUG: Step along (or against) the gradient
-        current = current .+ sign_mult .* step_size .* (g ./ g_norm)
+        next = current .+ sign_mult .* step_size .* (g ./ g_norm)
+        next_sdf = gear.shape_logic(next, gear.teeth_params)
+        if prev_sdf * next_sdf < 0.0
+            lo, hi = copy(current), copy(next)
+            lo_sdf = prev_sdf
+            for _ in 1:10
+                mid = (lo .+ hi) ./ 2
+                mid_sdf = gear.shape_logic(mid, gear.teeth_params)
+                if abs(mid_sdf) < am.slack * 0.1
+                    next = mid
+                    next_sdf = mid_sdf
+                    break
+                end
+                if lo_sdf * mid_sdf < 0.0
+                    hi = mid
+                else
+                    lo = mid
+                    lo_sdf = mid_sdf
+                end
+            end
+            current = next
+            push!(path, copy(current))
+            break
+        end
+        current = next
+        prev_sdf = next_sdf
         push!(path, copy(current))
-        
-        # GRUG: If we hit the surface (SDF ≈ 0), we've arrived.
-        sdf_val = gear.shape_logic(current, gear.teeth_params)
-        if abs(sdf_val) < am.slack
+        if abs(next_sdf) < max(am.slack * 10, step_size * 0.01)
             break
         end
     end
@@ -997,39 +1102,36 @@ function apply_differential(am::AntikytheraMap, gear_name::Symbol, point::Vector
         return Dict((i-n-1) => coeffs[i] for i in 1:m)
     end
     
-    # GRUG: Apply stencils dimension by dimension.
-    # This is a separable approximation - for mixed partials we do
-    # sequential 1D stencils along each dimension.
+    # GRUG: Build the stencil point-weight map.
+    # result_grid maps (evaluation_point → accumulated_weight).
+    # Start with weight=1.0 at the base point.
+    # For each (dim, order) spec, expand the current set of points
+    # by applying the 1D stencil in that dimension.
+    # At the end: result = Σ weight * f(point) / h^total_order
     
     result_grid = Dict{Vector{Float64}, Float64}()
-    
-    # Start with the base point
-    result_grid[copy(point)] = f(point, p)
+    result_grid[copy(point)] = 1.0  # weight, not value!
     
     for (dim, order) in diff_spec.specs
         stencil = compute_stencil(order)
         
         new_grid = Dict{Vector{Float64}, Float64}()
         
-        for (pt, val) in result_grid
+        for (pt, weight) in result_grid
             for (offset, coeff) in stencil
-                if offset == 0 && haskey(new_grid, pt)
-                    new_grid[pt] += val * coeff
-                else
-                    new_pt = copy(pt)
-                    new_pt[dim] += offset * h
-                    new_grid[new_pt] = get(new_grid, new_pt, 0.0) + val * coeff
-                end
+                new_pt = copy(pt)
+                new_pt[dim] += offset * h
+                new_grid[new_pt] = get(new_grid, new_pt, 0.0) + weight * coeff
             end
         end
         
         result_grid = new_grid
     end
     
-    # Evaluate the stencil
+    # Evaluate: Σ weight * f(point) / h^total_order
     numerator = 0.0
-    for (pt, coeff) in result_grid
-        numerator += coeff * f(pt, p)
+    for (pt, weight) in result_grid
+        numerator += weight * f(pt, p)
     end
     
     denominator = h ^ diff_spec.total_order
@@ -1075,9 +1177,11 @@ function print_help()
       /cast [preset]       Cast gears from foundry. 
                            preset = "default" | "all"
       /cast! <name> <shape> [p1 p2 ...]
+      /gear  <name> <shape> [p1 p2 ...]   (same as /cast!)
                            Cast single gear with custom params.
                            Shapes: sphere, torus, box, cylinder, 
-                                   gyroid, schwarz, twisted_torus
+                                   gyroid, schwarz, twisted_torus,
+                                   cone, capsule, plane, ellipsoid
       /throttle <0.0-1.0>  Set flow level. 0 = idle. 1 = max.
       /slack <value>        Set tolerance band (ε). Default 0.01.
       /gears               List all loaded gears.
@@ -1271,10 +1375,14 @@ function keepalive!(am::AntikytheraMap)
                 preset = length(tokens) >= 2 ? String(tokens[2]) : "default"
                 jit_cast_gears!(am; preset=preset)
                 
-            elseif cmd == "/cast!"
+            elseif cmd == "/cast!" || cmd == "/gear"
                 # /cast! GearName shape p1 p2 p3 ...
+                # /gear  GearName shape p1 p2 p3 ...  (alias)
                 if length(tokens) < 3
                     println("  Usage: /cast! <name> <shape> [p1 p2 ...]")
+                    println("  Alias:  /gear <name> <shape> [p1 p2 ...]")
+                    shape_list = join(sort(collect(keys(GEAR_LIBRARY))), ", ")
+                    println("  Shapes: $(shape_list)")
                 else
                     name = _parse_symbol(tokens, 2)
                     shape = lowercase(String(tokens[3]))
@@ -1439,20 +1547,27 @@ function keepalive!(am::AntikytheraMap)
                     println("  Usage: /sdf \"expression\" [p1 p2 ...]")
                     println("  Example: /sdf \"sin(x)*cos(y)-sqrt(z)-a\" 2.0")
                 else
-                    # Find the quoted expression
+                    # Find the quoted expression using match with offset
                     expr_match = match(r"\"([^\"]+)\"", line)
                     if expr_match === nothing
                         println("  ⚠️  Expression must be in quotes.")
                     else
                         expr_str = expr_match.captures[1]
-                        # Find params after the closing quote
-                        expr_end = findfirst(r"\"", line[2:end])
-                        if expr_end !== nothing
-                            after_expr = strip(line[expr_end[1]+2:end])
-                            param_tokens = split(after_expr)
-                            params = isempty(param_tokens) ? [0.0] : [parse(Float64, t) for t in param_tokens]
-                        else
-                            params = [0.0]
+                        # Extract everything after the closing quote for params
+                        # expr_match.offset = start of match, length of match tells us where closing quote is
+                        close_quote_pos = expr_match.offset + length(expr_match.match) - 1
+                        after_expr = close_quote_pos < length(line) ? strip(line[close_quote_pos+1:end]) : ""
+                        param_tokens = filter(!isempty, split(after_expr))
+                        params = Float64[]
+                        parse_ok = true
+                        for tok in param_tokens
+                            v = tryparse(Float64, tok)
+                            if v === nothing
+                                parse_ok = false
+                                println("  ⚠️  '$(tok)' is not a number. Ignored.")
+                            else
+                                push!(params, v)
+                            end
                         end
                         name = parse_user_sdf!(am, expr_str, params)
                     end
