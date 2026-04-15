@@ -122,7 +122,7 @@ test_throws("Probe blocked when throttle shut", "THROTTLE SHUT",
 
 machine.throttle_clamp = 0.5
 result = probe(machine, :Sphere, [0.0, 0.0, 0.0])
-test("Probe works when throttle open", result ≈ -5.0 atol=0.01)
+test("Probe works when throttle open", isapprox(result, -5.0; atol=0.01))
 
 # ==========================================================================
 # TEST SECTION 4: PROBE OPERATION (RAW SDF)
@@ -134,7 +134,7 @@ machine.throttle_clamp = 0.5
 
 # Sphere: at origin, SDF should be -radius (inside)
 sphere_inside = probe(machine, :Sphere, [0.0, 0.0, 0.0])
-test("Sphere probe at center (inside)", sphere_inside ≈ -5.0 atol=0.01)
+test("Sphere probe at center (inside)", isapprox(sphere_inside, -5.0; atol=0.01))
 
 # Sphere: on surface at radius
 sphere_surface = probe(machine, :Sphere, [5.0, 0.0, 0.0])
@@ -142,7 +142,7 @@ test("Sphere probe on surface", abs(sphere_surface) < 0.01)
 
 # Sphere: outside
 sphere_outside = probe(machine, :Sphere, [10.0, 0.0, 0.0])
-test("Sphere probe outside", sphere_outside ≈ 5.0 atol=0.01)
+test("Sphere probe outside", isapprox(sphere_outside, 5.0; atol=0.01))
 
 # Torus: inside the donut hole
 torus_hole = probe(machine, :Torus, [0.0, 0.0, 0.0])
@@ -154,7 +154,7 @@ test("Torus probe in tube (inside)", torus_tube < 0)
 
 # Gyroid: periodic oscillation
 gyroid_origin = probe(machine, :Gyroid, [0.0, 0.0, 0.0])
-test("Gyroid at origin", gyroid_origin ≈ 0.0 atol=0.01)
+test("Gyroid at origin", isapprox(gyroid_origin, 0.0; atol=0.01))
 
 # Dimension mismatch test
 test_throws("Dimension mismatch caught", "3D", 
@@ -169,12 +169,12 @@ section("5. GRADIENT OPERATION")
 # Sphere gradient at [0,0,0]: should point outward from center
 grad_origin = gradient(machine, :Sphere, [0.0, 0.0, 0.0])
 test("Sphere gradient at origin - direction", 
-    grad_origin[1] ≈ 0.0 atol=0.01 && grad_origin[2] ≈ 0.0 atol=0.01 && grad_origin[3] ≈ 0.0 atol=0.01)
+    isapprox(grad_origin[1], 0.0; atol=0.01) && isapprox(grad_origin[2], 0.0; atol=0.01) && isapprox(grad_origin[3], 0.0; atol=0.01))
 
 # Sphere gradient at [5,0,0]: should be normal to surface
 grad_surface = gradient(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere gradient at surface - magnitude", norm(grad_surface) ≈ 1.0 atol=0.02)
-test("Sphere gradient at surface - direction X", grad_surface[1] ≈ 1.0 atol=0.05)
+test("Sphere gradient at surface - magnitude", isapprox(norm(grad_surface), 1.0; atol=0.02))
+test("Sphere gradient at surface - direction X", isapprox(grad_surface[1], 1.0; atol=0.05))
 test("Sphere gradient at surface - direction Y/Z near zero", 
     abs(grad_surface[2]) < 0.05 && abs(grad_surface[3]) < 0.05)
 
@@ -198,12 +198,12 @@ section("6. SURFACE NORMAL")
 
 # Sphere normal at [5,0,0] should be [1,0,0]
 n_sphere = surface_normal(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Sphere normal unit length", norm(n_sphere) ≈ 1.0 atol=0.01)
-test("Sphere normal direction", n_sphere[1] ≈ 1.0 atol=0.05)
+test("Sphere normal unit length", isapprox(norm(n_sphere), 1.0; atol=0.01))
+test("Sphere normal direction", isapprox(n_sphere[1], 1.0; atol=0.05))
 
 # Torus normal
 n_torus = surface_normal(machine, :Torus, [10.0, 0.0, 0.0])
-test("Torus normal unit length", norm(n_torus) ≈ 1.0 atol=0.02)
+test("Torus normal unit length", isapprox(norm(n_torus), 1.0; atol=0.02))
 
 # ==========================================================================
 # TEST SECTION 7: CURVATURE (HESSIAN)
@@ -243,7 +243,7 @@ test("Sphere Laplacian computed", !isnan(lapl_sphere) && !isinf(lapl_sphere))
 
 # Divergence = Laplacian for scalar fields
 div_sphere = divergence(machine, :Sphere, [5.0, 0.0, 0.0])
-test("Divergence equals Laplacian", div_sphere ≈ lapl_sphere atol=1e-10)
+test("Divergence equals Laplacian", isapprox(div_sphere, lapl_sphere; atol=1e-10))
 
 # Gyroid Laplacian
 lapl_gyroid = laplacian(machine, :Gyroid, [1.0, 1.0, 1.0])
@@ -318,15 +318,15 @@ cast_single!(machine_morph, :MorphSphere, "sphere", [5.0])
 
 # Morph to larger radius
 morph!(machine_morph, :MorphSphere, [10.0], 0.0)  # t=0, no change
-test("Morph t=0 unchanged", machine_morph.gears[:MorphSphere].teeth_params[1] ≈ 5.0 atol=0.01)
+test("Morph t=0 unchanged", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 5.0; atol=0.01))
 
 morph!(machine_morph, :MorphSphere, [10.0], 1.0)  # t=1, full change
-test("Morph t=1 complete", machine_morph.gears[:MorphSphere].teeth_params[1] ≈ 10.0 atol=0.01)
+test("Morph t=1 complete", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 10.0; atol=0.01))
 
 # Reset and test intermediate
 machine_morph.gears[:MorphSphere].teeth_params[1] = 5.0
 morph!(machine_morph, :MorphSphere, [10.0], 0.5)  # t=0.5, halfway
-test("Morph t=0.5 intermediate", machine_morph.gears[:MorphSphere].teeth_params[1] ≈ 7.5 atol=0.01)
+test("Morph t=0.5 intermediate", isapprox(machine_morph.gears[:MorphSphere].teeth_params[1], 7.5; atol=0.01))
 
 # ==========================================================================
 # TEST SECTION 12: FLOW (STREAMLINE TRACING)
@@ -358,7 +358,7 @@ ray_origin = [15.0, 0.0, 0.0]
 ray_dir = [-1.0, 0.0, 0.0]
 hit_result = levelset(machine, :Sphere, ray_origin, ray_dir)
 test("Ray hits sphere", hit_result.hit)
-test("Ray hit distance correct", hit_result.distance ≈ 10.0 atol=0.1)  # 15 - 5 = 10
+test("Ray hit distance correct", isapprox(hit_result.distance, 10.0; atol=0.1))  # 15 - 5 = 10
 
 # Ray away from sphere
 miss_result = levelset(machine, :Sphere, ray_origin, [1.0, 0.0, 0.0]; max_dist=20.0)
@@ -398,11 +398,11 @@ user_name = parse_user_sdf!(machine_user, "sqrt(x*x + y*y + z*z) - a", [3.0])
 test("User SDF created", haskey(machine_user.gears, user_name))
 
 user_val = probe(machine_user, user_name, [0.0, 0.0, 0.0])
-test("User SDF probe at center", user_val ≈ -3.0 atol=0.1)
+test("User SDF probe at center", isapprox(user_val, -3.0; atol=0.1))
 
 user_grad = gradient(machine_user, user_name, [3.0, 0.0, 0.0])
 test("User SDF gradient computed", !any(isnan, user_grad))
-test("User SDF gradient magnitude ≈ 1", norm(user_grad) ≈ 1.0 atol=0.1)
+test("User SDF gradient magnitude ≈ 1", isapprox(norm(user_grad), 1.0; atol=0.1))
 
 # More complex: sin wave surface (IMPOSSIBLE to differentiate symbolically in closed form)
 user_name2 = parse_user_sdf!(machine_user, "sin(x) + cos(y) + sin(z)", [])
@@ -504,7 +504,7 @@ for i in 1:10
     cast_single!(machine_deep, Symbol("S$(i)"), "sphere", [Float64(i)])
     union_name = Symbol("U$(i)")
     boolean_union!(machine_deep, union_name, current_base, Symbol("S$(i)"))
-    current_base = union_name  # Chain the union
+    global current_base = union_name  # Chain the union
 end
 test("Deep CSG chain created", length(machine_deep.gears) > 20)
 

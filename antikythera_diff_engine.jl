@@ -47,16 +47,18 @@ mutable struct Cog
     # 2D gear = flat. 3D gear = chunky. 
     ndims::Int
     
-    function Cog(name::Symbol, logic::Function, params::Vector{Float64}; ndims::Int=3)
+    function Cog(name::Symbol, logic::Function, params::AbstractVector; ndims::Int=3)
+        # GRUG: Convert any vector to Float64 teeth.
+        float_params = convert(Vector{Float64}, params)
         # GRUG: Ghost gear no turn. Need at least one tooth.
-        if isempty(params)
+        if isempty(float_params)
             throw(MachineCrunch("GEAR $(name) HAS NO TEETH. CANNOT TURN.", "Cog constructor"))
         end
         # GRUG: Gear must live somewhere. No zero-dimension ghosts.
         if ndims < 2 || ndims > 3
             throw(MachineCrunch("GEAR $(name) MUST BE 2D OR 3D. GOT $(ndims)D.", "Cog constructor"))
         end
-        new(name, logic, params, ndims)
+        new(name, logic, float_params, ndims)
     end
 end
 
@@ -425,7 +427,7 @@ function curvature(am::AntikytheraMap, gear_name::Symbol, point::Vector{Float64}
         B = zeros(4, 4)
         B[1:3, 1:3] .= H
         B[1:3, 4] .= g
-        B[4, 1:3] .= g'
+        B[4, 1:3] .= vec(g')
         B[4, 4] = 0.0
         
         gauss_k = -det(B) / (g_norm^4)
@@ -820,7 +822,7 @@ end
 
 const USER_GEAR_COUNTER = Ref(0)
 
-function parse_user_sdf!(am::AntikytheraMap, expr_str::String, params::Vector{Float64}; 
+function parse_user_sdf!(am::AntikytheraMap, expr_str::String, params::AbstractVector; 
                          name::Union{Symbol,Nothing}=nothing, ndims::Int=3)
     # GRUG: Turn string into Julia function.
     # "sin(x)*cos(y) + sqrt(z)" → (p, params) -> sin(p[1])*cos(p[2]) + sqrt(p[3])
@@ -837,6 +839,7 @@ function parse_user_sdf!(am::AntikytheraMap, expr_str::String, params::Vector{Fl
     body = lowercase(safe_expr)
     
     # Coordinate substitution: x,y,z → p[1],p[2],p[3], etc.
+    # Use word boundaries to avoid replacing inside words like "sqrt" or "exp"
     coord_map = Dict(
         'x' => "p[1]", 'y' => "p[2]", 'z' => "p[3]",
         'r' => "sqrt(p[1]^2+p[2]^2+p[3]^2)",  # radial distance
@@ -845,13 +848,14 @@ function parse_user_sdf!(am::AntikytheraMap, expr_str::String, params::Vector{Fl
     )
     
     for (c, sub) in coord_map
-        body = replace(body, string(c) => sub)
-        # Also handle single-letter coords preceded by word boundary
+        # Use regex with word boundaries to match standalone letters only
+        body = replace(body, Regex("\\b$(string(c))\\b") => sub)
     end
     
     # GRUG: params[i] accessible as a,b,c,... or p0,p1,p2,...
     for i in 1:min(length(params), 26)
-        body = replace(body, string('a' + i - 1) => "params[$i]")
+        # Use word boundary for single-letter parameter names
+        body = replace(body, Regex("\\b$(string('a' + i - 1))\\b") => "params[$i]")
         body = replace(body, "p$(i)" => "params[$i]")
     end
     
@@ -868,16 +872,20 @@ function parse_user_sdf!(am::AntikytheraMap, expr_str::String, params::Vector{Fl
             name = Symbol("UserGear_", USER_GEAR_COUNTER[])
         end
         
-        # Validate: try calling it once
+        # Validate: try calling it once using invokelatest to handle world age
         test_p = zeros(ndims)
-        test_result = func(test_p, params)
+        test_result = Base.invokelatest(func, test_p, params)
         
         if !isa(test_result, Number)
             throw(MachineCrunch("EXPRESSION DOES NOT RETURN A NUMBER.", "parse_user_sdf!"))
         end
         
+        # GRUG: If no params, use dummy param so gear can turn.
+        # User SDFs without parameters are still valid geometries.
+        gear_params = isempty(params) ? [0.0] : copy(params)
+        
         # Create the gear
-        am.gears[name] = Cog(name, func, copy(params); ndims=ndims)
+        am.gears[name] = Cog(name, func, gear_params; ndims=ndims)
         println("⚙️  GRUG: Cast user-defined gear :$(name)")
         println("   Expression: $(strip(expr_str))")
         println("   Params: $(params)")
@@ -1432,13 +1440,13 @@ function keepalive!(am::AntikytheraMap)
                     println("  Example: /sdf \"sin(x)*cos(y)-sqrt(z)-a\" 2.0")
                 else
                     # Find the quoted expression
-                    expr_match = match(r'"([^"]+)"', line)
+                    expr_match = match(r"\"([^\"]+)\"", line)
                     if expr_match === nothing
                         println("  ⚠️  Expression must be in quotes.")
                     else
                         expr_str = expr_match.captures[1]
                         # Find params after the closing quote
-                        expr_end = findfirst(r'"', line[2:end])
+                        expr_end = findfirst(r"\"", line[2:end])
                         if expr_end !== nothing
                             after_expr = strip(line[expr_end[1]+2:end])
                             param_tokens = split(after_expr)
