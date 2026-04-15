@@ -257,9 +257,12 @@ test("Torus normal unit length",   isapprox(norm(n_torus), 1.0; atol=0.02))
 n_gyroid = surface_normal(machine, :Gyroid, [1.57, 0.0, 0.0])
 test("Gyroid normal unit length",  isapprox(norm(n_gyroid), 1.0; atol=0.05))
 
-# Zero gradient point → should throw
-test_throws("Normal at zero-gradient point throws", "ZERO",
-    () -> surface_normal(machine, :Sphere, [0.0, 0.0, 0.0]))
+# Zero gradient point → should auto-project to surface (not throw)
+# The sphere origin [0,0,0] has zero gradient (inside, SDF=-5).
+# surface_normal will project to the sphere surface before computing.
+n_zero_start = surface_normal(machine, :Sphere, [0.0, 0.0, 0.0])
+test("Normal at zero-gradient point: auto-projected, unit length",
+    isapprox(norm(n_zero_start), 1.0; atol=0.01))
 
 # ==========================================================================
 # SECTION 7: CURVATURE (HESSIAN) — INTRACTABLE FOR SYMBOLIC DIFF
@@ -293,9 +296,13 @@ test("Gyroid mean curvature ≈ 0 (minimal surface)", abs(curv_gyroid_origin.mea
 curv_twisted = curvature(machine, :TwistedTorus, [10.0, 0.0, 0.0])
 test("TwistedTorus curvature computed",   !isnan(curv_twisted.mean))
 
-# Zero gradient → should throw for curvature
-test_throws("Curvature at zero-gradient throws", "ZERO GRADIENT",
-    () -> curvature(machine, :Sphere, [0.0, 0.0, 0.0]))
+# Zero gradient → curvature auto-projects to surface (not throw)
+# The sphere origin [0,0,0] has zero gradient. Auto-projected to surface before computing.
+curv_zero_start = curvature(machine, :Sphere, [0.0, 0.0, 0.0])
+test("Curvature at zero-gradient point: auto-projected, mean ≈ 1/R=0.2",
+    abs(curv_zero_start.mean - 0.2) < 0.03)
+test("Curvature at zero-gradient point: no NaN",
+    !isnan(curv_zero_start.mean) && !isinf(curv_zero_start.mean))
 
 # ==========================================================================
 # SECTION 8: LAPLACIAN AND DIVERGENCE
@@ -622,10 +629,13 @@ test_throws("Throttle shut throws",       "THROTTLE",
         jit_cast_gears!(m_test)
         probe(m_test, :Sphere, [5.0,0.0,0.0])
     end)
-test_throws("Zero gradient normal throws", "ZERO",
-    () -> surface_normal(machine, :Sphere, [0.0,0.0,0.0]))
-test_throws("Zero gradient curvature throws", "ZERO GRADIENT",
-    () -> curvature(machine, :Sphere, [0.0,0.0,0.0]))
+# Zero gradient → auto-projection (no exception). Verify projection produces valid result.
+n_proj = surface_normal(machine, :Sphere, [0.0,0.0,0.0])
+test("Zero gradient normal: auto-projects to surface, unit length",
+    isapprox(norm(n_proj), 1.0; atol=0.01))
+c_proj = curvature(machine, :Sphere, [0.0,0.0,0.0])
+test("Zero gradient curvature: auto-projects, mean ≈ 0.2",
+    abs(c_proj.mean - 0.2) < 0.03)
 test_throws("Invalid diff spec throws",   "INVALID",
     () -> parse_diff_spec("xyz"))
 test_throws("Empty SDF expr throws",      "EMPTY",
@@ -731,6 +741,66 @@ boolean_union!(machine_int2, :UserUnion, u_name, u_name)
 test("User SDF → boolean union created", haskey(machine_int2.gears, :UserUnion))
 uu_val = probe(machine_int2, :UserUnion, [1.0,1.0,0.0])
 test("User SDF → union probe works",     !isnan(uu_val))
+
+# ==========================================================================
+# SECTION 20: DEMO COMMAND REGRESSION — THE 4 PREVIOUSLY-FAILING COMMANDS
+# ==========================================================================
+# GRUG: These commands broke the demo video. Now they must never break again.
+#        Each one hit a zero-gradient degenerate point. Now auto-projected.
+# ==========================================================================
+section("20. DEMO REGRESSION — AUTO-PROJECTION AT DEGENERATE POINTS")
+
+machine_demo = AntikytheraMap(0.001)
+machine_demo.throttle_clamp = 0.5
+jit_cast_gears!(machine_demo)
+
+# --- Demo command 1: /curvature Torus 8.0 0.0 0.0 ---
+# [8,0,0] is at the tube axis of Torus[8,2]. SDF=-2, |grad|≈0.
+# Should auto-project to inner equator [6,0,0] and compute curvature.
+c_torus_deg = curvature(machine_demo, :Torus, [8.0, 0.0, 0.0])
+test("Demo: /curvature Torus 8.0 0.0 0.0 — no NaN",   !isnan(c_torus_deg.mean))
+test("Demo: /curvature Torus 8.0 0.0 0.0 — no Inf",   !isinf(c_torus_deg.mean))
+test("Demo: /curvature Torus 8.0 0.0 0.0 — reasonable mean",
+    abs(c_torus_deg.mean) < 5.0)
+
+# --- Demo command 2: /gear TwistedDonut twisted_torus 8.0 2.0 2.5 then /curvature ---
+# TwistedDonut not in default set — must cast it first.
+# [8,0,0] is at tube axis of TwistedDonut[8,2,2.5]. SDF=-2, |grad|≈0.
+cast_single!(machine_demo, :TwistedDonut, "twisted_torus", [8.0, 2.0, 2.5])
+test("Demo: /gear TwistedDonut cast", haskey(machine_demo.gears, :TwistedDonut))
+
+c_twisted_deg = curvature(machine_demo, :TwistedDonut, [8.0, 0.0, 0.0])
+test("Demo: /curvature TwistedDonut 8.0 0.0 0.0 — no NaN", !isnan(c_twisted_deg.mean))
+test("Demo: /curvature TwistedDonut 8.0 0.0 0.0 — no Inf", !isinf(c_twisted_deg.mean))
+
+# --- Demo command 3: /geodesic Torus 8.0 0.0 0.0 -8.0 0.0 0.0 ---
+# Both [8,0,0] and [-8,0,0] are inside the torus tube. Auto-projected to surface.
+geo_demo = geodesic(machine_demo, :Torus, [8.0, 0.0, 0.0], [-8.0, 0.0, 0.0]; max_steps=500)
+test("Demo: /geodesic Torus 8.0 0.0 0.0 -8.0 0.0 0.0 — path exists",
+    length(geo_demo.path) > 1)
+test("Demo: /geodesic Torus 8.0 0.0 0.0 -8.0 0.0 0.0 — distance > 0",
+    geo_demo.distance > 0)
+# Path endpoints should be on the surface (after projection)
+test("Demo: /geodesic Torus — start projected to surface",
+    abs(probe(machine_demo, :Torus, geo_demo.path[1])) < 0.05)
+test("Demo: /geodesic Torus — end projected to surface",
+    abs(probe(machine_demo, :Torus, geo_demo.path[end])) < 0.05)
+
+# --- Demo command 4: /gear MorphTorus + /morph + /curvature MorphTorus 10.0 0.0 0.0 ---
+# After morph from [8,2]→[12,3] at t=0.5, params=[10,2.5].
+# [10,0,0] is at tube axis of Torus[10,2.5]. SDF=-2.5, |grad|=0.
+cast_single!(machine_demo, :MorphTorus, "torus", [8.0, 2.0])
+morph!(machine_demo, :MorphTorus, [12.0, 3.0], 0.5)
+test("Demo: MorphTorus params after morph — major R=10",
+    isapprox(machine_demo.gears[:MorphTorus].teeth_params[1], 10.0; atol=0.001))
+test("Demo: MorphTorus params after morph — minor r=2.5",
+    isapprox(machine_demo.gears[:MorphTorus].teeth_params[2], 2.5; atol=0.001))
+
+c_morph_deg = curvature(machine_demo, :MorphTorus, [10.0, 0.0, 0.0])
+test("Demo: /curvature MorphTorus 10.0 0.0 0.0 — no NaN", !isnan(c_morph_deg.mean))
+test("Demo: /curvature MorphTorus 10.0 0.0 0.0 — no Inf", !isinf(c_morph_deg.mean))
+test("Demo: /curvature MorphTorus 10.0 0.0 0.0 — reasonable mean",
+    abs(c_morph_deg.mean) < 5.0)
 
 # ==========================================================================
 # FINAL SUMMARY

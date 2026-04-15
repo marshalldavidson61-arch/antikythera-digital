@@ -408,12 +408,27 @@ end
 # GRUG: "Which way does the surface FACE at this spot?"
 #        Just the gradient, but normalized to length 1.
 #        Needed for lighting, reflection, collision, everything.
+#
+# GRUG NOTE: If point has zero gradient (e.g. dead centre of torus tube,
+#             sphere origin), we auto-project to nearest surface and warn.
+#             No silent failures. GRUG SHOUT WHEN ROCK MOVES.
 # ----------------------------------------------------------
 function surface_normal(am::AntikytheraMap, gear_name::Symbol, point::Vector{Float64})::Vector{Float64}
     g = gradient(am, gear_name, point)
     n = norm(g)
     if n < 1e-12
-        throw(MachineCrunch("GRADIENT IS ZERO AT THIS POINT. NO SURFACE HERE.", "surface_normal"))
+        # GRUG: Zero gradient = degenerate point (symmetry axis, tube centre, etc.)
+        # Project to nearest surface and retry. Warn loudly - no silent failures.
+        projected = _project_to_surface(am, gear_name, point)
+        dist_moved = norm(projected .- point)
+        println("  WARNING: Zero gradient at $(point). Auto-projected to surface.")
+        println("           Projected: $(projected)  (moved $(round(dist_moved, digits=4)))")
+        g = gradient(am, gear_name, projected)
+        n = norm(g)
+        if n < 1e-12
+            throw(MachineCrunch("GRADIENT IS ZERO AT THIS POINT. NO SURFACE HERE.", "surface_normal"))
+        end
+        return g ./ n
     end
     return g ./ n
 end
@@ -425,6 +440,10 @@ end
 #        For composed SDFs, doing this symbolically is INSANE.
 #        You'd need the chain rule applied to the chain rule.
 #        But spatially? Just poke three times per pair of axes.
+#
+# GRUG NOTE: If point has zero gradient (degenerate/interior point),
+#             we auto-project to nearest surface point and warn.
+#             No silent failures. GRUG SHOUT WHEN ROCK MOVES.
 #
 # Returns: (mean_curvature, gaussian_curvature, principal_k1, principal_k2)
 # ----------------------------------------------------------
@@ -442,29 +461,44 @@ function curvature(am::AntikytheraMap, gear_name::Symbol, point::Vector{Float64}
     # GRUG: First get the gradient (first derivatives)
     g = gradient(am, gear_name, point)
     g_norm = norm(g)
+    
+    # GRUG: Zero gradient = degenerate point (symmetry axis, tube centre, etc.)
+    # Common causes: centre of sphere, tube axis of torus at major radius,
+    # any point where the SDF has a local extremum or is exactly at an axis.
+    # Auto-project to nearest surface and retry. Warn loudly - no silent failures.
+    actual_point = point
     if g_norm < 1e-12
-        throw(MachineCrunch("ZERO GRADIENT. CAN'T MEASURE CURVATURE IN FLAT VOID.", "curvature"))
+        projected = _project_to_surface(am, gear_name, point)
+        dist_moved = norm(projected .- point)
+        println("  WARNING: Zero gradient at $(point). Auto-projected to surface.")
+        println("           Projected: $(projected)  (moved $(round(dist_moved, digits=4)))")
+        actual_point = projected
+        g = gradient(am, gear_name, actual_point)
+        g_norm = norm(g)
+        if g_norm < 1e-12
+            throw(MachineCrunch("ZERO GRADIENT EVEN AFTER SURFACE PROJECTION. GEOMETRY IS DEGENERATE.", "curvature"))
+        end
     end
     
-    # GRUG: Now build the Hessian (second derivatives).
+    # GRUG: Now build the Hessian (second derivatives) at actual_point.
     # H[i,j] = d²f / (dxi dxj)
     # Each entry = poke twice, measure once.
     H = zeros(nd, nd)
-    f0 = f(point, p)
+    f0 = f(actual_point, p)
     try
         for i in 1:nd
             for j in i:nd
                 if i == j
                     # GRUG: Diagonal = pure second derivative
-                    fwd = f(point .+ _basis(nd, i, h), p)
-                    bwd = f(point .- _basis(nd, i, h), p)
+                    fwd = f(actual_point .+ _basis(nd, i, h), p)
+                    bwd = f(actual_point .- _basis(nd, i, h), p)
                     H[i, i] = (fwd - 2 * f0 + bwd) / (h * h)
                 else
                     # GRUG: Off-diagonal = mixed partial
-                    fpp = f(point .+ _basis(nd, i, h) .+ _basis(nd, j, h), p)
-                    fpm = f(point .+ _basis(nd, i, h) .- _basis(nd, j, h), p)
-                    fmp = f(point .- _basis(nd, i, h) .+ _basis(nd, j, h), p)
-                    fmm = f(point .- _basis(nd, i, h) .- _basis(nd, j, h), p)
+                    fpp = f(actual_point .+ _basis(nd, i, h) .+ _basis(nd, j, h), p)
+                    fpm = f(actual_point .+ _basis(nd, i, h) .- _basis(nd, j, h), p)
+                    fmp = f(actual_point .- _basis(nd, i, h) .+ _basis(nd, j, h), p)
+                    fmm = f(actual_point .- _basis(nd, i, h) .- _basis(nd, j, h), p)
                     H[i, j] = (fpp - fpm - fmp + fmm) / (4 * h * h)
                     H[j, i] = H[i, j]  # Symmetric
                 end
@@ -853,9 +887,22 @@ function geodesic(am::AntikytheraMap, gear_name::Symbol,
     _require_point(target, gear)
     am.query_count += 1
     
-    # GRUG: First project both points onto the surface
+    # GRUG: First project both points onto the surface.
+    # If start/end are not on the surface (SDF != 0), project them.
+    # Warn loudly if significant movement needed — no silent failures.
     current = _project_to_surface(am, gear_name, start)
+    start_moved = norm(current .- start)
+    if start_moved > am.slack * 10
+        println("  WARNING: Start point $(start) not on surface (SDF=$(round(gear.shape_logic(start, gear.teeth_params), digits=4))).")
+        println("           Projected to $(round.(current, digits=4))  (moved $(round(start_moved, digits=4)))")
+    end
+    
     target_proj = _project_to_surface(am, gear_name, target)
+    end_moved = norm(target_proj .- target)
+    if end_moved > am.slack * 10
+        println("  WARNING: End point $(target) not on surface (SDF=$(round(gear.shape_logic(target, gear.teeth_params), digits=4))).")
+        println("           Projected to $(round.(target_proj, digits=4))  (moved $(round(end_moved, digits=4)))")
+    end
     
     total_dist = 0.0
     path = [copy(current)]
@@ -896,25 +943,112 @@ end
 
 # GRUG: Push a point onto the nearest surface (SDF = 0).
 # Walk along the gradient until we hit zero.
+#
+# GRUG NOTE: If the starting point has zero gradient (degenerate symmetry point
+#             like the tube axis of a torus at its major radius, or sphere centre),
+#             we try perturbations in each axis direction to escape the flat void,
+#             then project from the best perturbed position.
+#             No silent failures: if nothing works, we return best guess.
 function _project_to_surface(am::AntikytheraMap, gear_name::Symbol, 
                               point::Vector{Float64}; max_iter::Int=50)::Vector{Float64}
     gear = _require_gear(am, gear_name)
-    current = copy(point)
+    nd = gear.ndims
+    f = gear.shape_logic
+    p = gear.teeth_params
+    h = am.slack
     
-    for _ in 1:max_iter
-        d = gear.shape_logic(current, gear.teeth_params)
-        if abs(d) < am.slack * 0.1
-            return current
+    # GRUG: Helper - gradient at an arbitrary point (no query_count increment)
+    function _raw_gradient(pt::Vector{Float64})::Vector{Float64}
+        g = zeros(nd)
+        for dim in 1:nd
+            ep = copy(pt); ep[dim] += h
+            em = copy(pt); em[dim] -= h
+            g[dim] = (f(ep, p) - f(em, p)) / (2 * h)
         end
-        g = gradient(am, gear_name, current)
-        g_norm = norm(g)
-        if g_norm < 1e-12
-            return current  # GRUG: Flat void. Can't project. Return as-is.
-        end
-        current = current .- d .* (g ./ (g_norm^2))
+        return g
     end
     
-    return current
+    # GRUG: Helper - project from a point that has nonzero gradient
+    function _project_from(start::Vector{Float64})::Vector{Float64}
+        cur = copy(start)
+        for _ in 1:max_iter
+            d = f(cur, p)
+            if abs(d) < h * 0.1
+                return cur
+            end
+            g = _raw_gradient(cur)
+            g_norm = norm(g)
+            if g_norm < 1e-12
+                return cur  # stuck again
+            end
+            cur = cur .- d .* (g ./ (g_norm^2))
+        end
+        return cur
+    end
+    
+    # GRUG: Check if starting point already has nonzero gradient
+    d0 = f(point, p)
+    if abs(d0) < h * 0.1
+        return copy(point)  # Already on surface
+    end
+    
+    g0 = _raw_gradient(point)
+    if norm(g0) >= 1e-10
+        # Normal case: gradient exists, project directly
+        return _project_from(point)
+    end
+    
+    # GRUG: Zero gradient at starting point. Try perturbations to escape.
+    # Use the SDF value magnitude as perturbation scale (we're |d| from the surface).
+    # Try ±|d| perturbations along each axis, pick the one with best gradient.
+    perturb_scale = abs(d0) > h ? abs(d0) : h * 10
+    
+    best_pt = copy(point)
+    best_g_norm = 0.0
+    
+    # Try perturbations in each axis direction (both + and -)
+    for dim in 1:nd
+        for sign in (+1.0, -1.0)
+            perturbed = copy(point)
+            perturbed[dim] += sign * perturb_scale
+            gp = _raw_gradient(perturbed)
+            gp_norm = norm(gp)
+            if gp_norm > best_g_norm
+                best_g_norm = gp_norm
+                best_pt = perturbed
+            end
+        end
+    end
+    
+    if best_g_norm < 1e-12
+        # GRUG: Still stuck. Try larger perturbations (2x, 5x scale).
+        for scale_mult in (2.0, 5.0, 10.0)
+            for dim in 1:nd
+                for sign in (+1.0, -1.0)
+                    perturbed = copy(point)
+                    perturbed[dim] += sign * perturb_scale * scale_mult
+                    gp = _raw_gradient(perturbed)
+                    gp_norm = norm(gp)
+                    if gp_norm > best_g_norm
+                        best_g_norm = gp_norm
+                        best_pt = perturbed
+                    end
+                end
+            end
+            if best_g_norm >= 1e-10
+                break
+            end
+        end
+    end
+    
+    if best_g_norm < 1e-12
+        # GRUG: Completely stuck. Geometry is degenerate everywhere nearby.
+        # Return original point. Caller should handle this.
+        return copy(point)
+    end
+    
+    # GRUG: Project from the best perturbed position
+    return _project_from(best_pt)
 end
 
 # ==========================================================================
@@ -1443,10 +1577,10 @@ function keepalive!(am::AntikytheraMap)
                 pt = _parse_floats(tokens, 3, 3)
                 c = curvature(am, gear, pt)
                 println("  Curvature at :$(gear) $(pt):")
-                println("    Mean (κ_H):     $(c.mean)")
-                println("    Gaussian (κ_G): $(c.gaussian)")
-                println("    Principal κ₁:   $(c.k1)")
-                println("    Principal κ₂:   $(c.k2)")
+                println("    Mean (κ_H):     $(round(c.mean, digits=6))")
+                println("    Gaussian (κ_G): $(round(c.gaussian, digits=6))")
+                println("    Principal κ₁:   $(round(c.k1, digits=6))")
+                println("    Principal κ₂:   $(round(c.k2, digits=6))")
                 
             elseif cmd == "/laplacian"
                 gear = _parse_symbol(tokens, 2)
