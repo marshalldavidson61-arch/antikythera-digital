@@ -1,5 +1,7 @@
 # Antikythera Digital
 
+[![CI](https://github.com/marshalldavidson61-arch/antikythera-digital/actions/workflows/ci.yml/badge.svg)](https://github.com/marshalldavidson61-arch/antikythera-digital/actions/workflows/ci.yml)
+
 **Geometric Computation Engine for Operations Intractable to Traditional Methods**
 
 ---
